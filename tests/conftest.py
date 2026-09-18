@@ -103,3 +103,55 @@ def populated_store(store):
         store.upsert("odds_quote", quotes,
                      ["match_id", "book", "market", "selection", "quoted_at"])
     return store
+
+
+def generate_shots(matches: pd.DataFrame, results: pd.DataFrame,
+                   rng: np.random.Generator) -> pd.DataFrame:
+    """Synthetic shot-level xG consistent with the scorelines.
+
+    Real xG is a noisy estimate of the same underlying rate that produced the
+    goals, so the generator draws shots around the realised score rather than
+    independently of it.
+    """
+    merged = matches.merge(results[["match_id", "home_goals", "away_goals"]], on="match_id")
+    rows = []
+    for row in merged.itertuples(index=False):
+        for side, team, goals in (("h", row.home_team_id, row.home_goals),
+                                  ("a", row.away_team_id, row.away_goals)):
+            n_shots = max(1, int(rng.poisson(9)))
+            # Total xG hovers around the realised goals, with the usual spread.
+            total = max(0.15, goals + rng.normal(0.0, 0.55))
+            weights = rng.dirichlet(np.ones(n_shots))
+            for i, share in enumerate(weights):
+                rows.append({
+                    "shot_id": f"{row.match_id}:{side}:{i}",
+                    "match_id": row.match_id,
+                    "team_id": team,
+                    "player_name": None,
+                    "minute": int(rng.integers(1, 91)),
+                    "x": float(rng.uniform(0.6, 1.0)),
+                    "y": float(rng.uniform(0.2, 0.8)),
+                    "xg": float(min(0.95, total * share)),
+                    "body_part": "RightFoot",
+                    "situation": "OpenPlay",
+                    "result": "Goal" if i == 0 and goals > 0 else "MissedShots",
+                    "known_at": row.kickoff_utc + timedelta(
+                        seconds=SETTINGS.result_known_after_seconds),
+                })
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
+def store_with_shots(store):
+    """Three synthetic seasons with shot-level xG attached."""
+    rng = np.random.default_rng(4242)
+    for offset in range(3):
+        season_start = datetime(2021 + offset, 8, 10, 15, 30)
+        season = f"{2021 + offset}-{str(2022 + offset)[-2:]}"
+        matches, results, quotes = generate_season(season_start, season, rng)
+        store.upsert("match", matches, ["match_id"])
+        store.upsert("match_result", results, ["match_id"])
+        store.upsert("odds_quote", quotes,
+                     ["match_id", "book", "market", "selection", "quoted_at"])
+        store.upsert("shot", generate_shots(matches, results, rng), ["shot_id"])
+    return store
