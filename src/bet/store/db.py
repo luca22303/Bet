@@ -349,6 +349,7 @@ class Store:
                 WHERE {' AND '.join(where)}
             )
             WHERE rn = 1
+            ORDER BY known_at DESC, match_id, player_id
         """
         return self.con.execute(sql, params).df()
 

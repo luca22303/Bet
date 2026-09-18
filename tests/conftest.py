@@ -158,23 +158,49 @@ def store_with_shots(store):
     return store
 
 
-# Squad archetypes: (suffix, position, shots per 90, expected assists per 90,
-# start probability). Creative output is a separate rate rather than noise, so a
-# playmaker and a poacher are distinguishable -- with a flat random xa the whole
-# squad ends up with near-identical attacking contributions and nothing that
-# depends on player quality can be tested.
+# Squad archetypes: (suffix, position, shots/90, xA/90, defensive actions/90,
+# start probability).
+#
+# Every rate varies by role rather than being drawn flat. That matters more than
+# it looks: with a flat random xA the whole squad ends up with near-identical
+# attacking contributions, and with a flat tackle rate a centre-back defends no
+# better than a striker. Either one makes it impossible to test anything that
+# depends on who is actually on the pitch.
 SQUAD_TEMPLATE = [
-    ("gk", "GK", 0.05, 0.01, 1.00),
-    ("cb1", "DF", 0.35, 0.04, 0.95), ("cb2", "DF", 0.30, 0.03, 0.90),
-    ("lb", "DF", 0.45, 0.12, 0.85), ("rb", "DF", 0.50, 0.14, 0.85),
-    ("dm", "MF", 0.70, 0.08, 0.90), ("cm1", "MF", 1.10, 0.18, 0.80),
-    ("cm2", "MF", 1.30, 0.22, 0.70),
-    ("am", "MF,FW", 2.10, 0.42, 0.75), ("lw", "FW", 2.40, 0.30, 0.70),
-    ("rw", "FW", 2.30, 0.28, 0.65),
-    ("st", "FW", 3.40, 0.18, 0.85),
-    ("sub1", "MF", 1.20, 0.15, 0.15), ("sub2", "FW", 2.00, 0.16, 0.12),
-    ("sub3", "DF", 0.30, 0.03, 0.10),
+    ("gk", "GK", 0.05, 0.01, 0.30, 0.94),
+    # A backup keeper, because every real squad has one. Without him, ruling
+    # out the first choice leaves no eligible goalkeeper and the selector has to
+    # fall back to an ineligible player -- correct behaviour for a squad that
+    # genuinely has no cover, but not a situation any real team is in.
+    ("gk2", "GK", 0.02, 0.01, 0.25, 0.06),
+    ("cb1", "DF", 0.35, 0.04, 4.20, 0.95), ("cb2", "DF", 0.30, 0.03, 3.90, 0.90),
+    ("lb", "DF", 0.45, 0.12, 3.60, 0.85), ("rb", "DF", 0.50, 0.14, 3.50, 0.85),
+    ("dm", "MF", 0.70, 0.08, 4.00, 0.90), ("cm1", "MF", 1.10, 0.18, 2.60, 0.80),
+    ("cm2", "MF", 1.30, 0.22, 2.30, 0.70),
+    ("am", "MF,FW", 2.10, 0.42, 1.20, 0.75), ("lw", "FW", 2.40, 0.30, 0.90, 0.70),
+    ("rw", "FW", 2.30, 0.28, 0.85, 0.65),
+    ("st", "FW", 3.40, 0.18, 0.50, 0.85),
+    ("sub1", "MF", 1.20, 0.15, 2.40, 0.15), ("sub2", "FW", 2.00, 0.16, 0.80, 0.12),
+    ("sub3", "DF", 0.30, 0.03, 3.40, 0.10),
 ]
+
+
+def _choose_starting_xi(rng: np.random.Generator) -> set[str]:
+    """Eleven starters, one keeper, sampled by each player's start propensity.
+
+    Uses the exponential-race trick for weighted sampling without replacement:
+    the player with the smallest `Exponential(1) / weight` is picked first, which
+    draws without replacement in proportion to the weights.
+    """
+    keepers = [(s, p) for s, _, _, _, _, p in SQUAD_TEMPLATE if s.startswith("gk")]
+    outfield = [(s, p) for s, pos, _, _, _, p in SQUAD_TEMPLATE if not s.startswith("gk")]
+
+    def draw(pool, count):
+        keys = [(rng.exponential() / max(weight, 1e-6), suffix) for suffix, weight in pool]
+        keys.sort()
+        return [suffix for _, suffix in keys[:count]]
+
+    return set(draw(keepers, 1) + draw(outfield, 10))
 
 
 def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
@@ -192,7 +218,13 @@ def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
             known_at = row.kickoff_utc + timedelta(
                 seconds=SETTINGS.result_known_after_seconds)
 
-            for suffix, position, shot_rate, assist_rate, start_prob in SQUAD_TEMPLATE:
+            # Exactly eleven start, one of them a goalkeeper. Drawing each
+            # player's start independently lets a match field twelve or thirteen
+            # starters, which makes every inferred formation nonsense ("4-4-3")
+            # and quietly corrupts anything built on line-up shape.
+            starting_xi = _choose_starting_xi(rng)
+
+            for suffix, position, shot_rate, assist_rate, defence_rate, start_prob in SQUAD_TEMPLATE:
                 player_id = f"{team_id}_{suffix}"
                 full_name = f"{suffix.upper()} {team_id.replace('_', ' ').title()}"
                 if player_id not in seen:
@@ -202,7 +234,7 @@ def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
                         "source": source, "source_id": None, "known_at": known_at,
                     })
 
-                started = rng.random() < start_prob
+                started = suffix in starting_xi
                 if started:
                     minutes = float(rng.integers(60, 91))
                 elif rng.random() < 0.45:
@@ -232,9 +264,12 @@ def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
                     "progressive_passes": float(rng.integers(0, 9)),
                     "touches": float(rng.integers(20, 100)),
                     "carries": float(rng.integers(10, 60)),
-                    "tackles": float(rng.poisson(1.4 * nineties)),
-                    "interceptions": float(rng.poisson(0.9 * nineties)),
-                    "blocks": float(rng.poisson(0.6 * nineties)),
+                    # Split the player's defensive rate across the three
+                    # actions, so a centre-back and a striker are not
+                    # interchangeable on this side of the ball.
+                    "tackles": float(rng.poisson(defence_rate * 0.5 * nineties)),
+                    "interceptions": float(rng.poisson(defence_rate * 0.33 * nineties)),
+                    "blocks": float(rng.poisson(defence_rate * 0.17 * nineties)),
                     "fouls": float(rng.poisson(1.0 * nineties)),
                     "yellow_cards": float(rng.binomial(1, 0.12)),
                     "red_cards": 0.0,

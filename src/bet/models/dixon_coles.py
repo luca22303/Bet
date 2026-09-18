@@ -402,6 +402,7 @@ class DixonColesModel(Model):
         self.prior = None
         self.player_rates: pd.DataFrame = pd.DataFrame()
         self.absence_impacts: dict[str, object] = {}
+        self.lineups: dict[str, object] = {}
         self._fallback = np.array([0.45, 0.25, 0.30])
 
     # ------------------------------------------------------------------ fit
@@ -471,37 +472,55 @@ class DixonColesModel(Model):
             lam, mu = self._rates(row.home_team_id, row.away_team_id)
             if self.use_availability:
                 lam, mu = self._apply_availability(
-                    store, as_of, row.home_team_id, row.away_team_id, lam, mu)
+                    store, as_of, row.home_team_id, row.away_team_id, lam, mu,
+                    match_id=getattr(row, "match_id", None))
             out[i] = match_probabilities(lam, mu, self.params.rho)
         return self._validate(out, len(fixtures))
 
-    def _absence_impact(self, store, as_of: datetime, team_id: str):
-        """Cached per-team absence impact for this as_of."""
-        from bet.availability import absences_from_store, estimate_absence_impact
+    def _lineup_for(self, store, as_of: datetime, team_id: str, match_id: str | None = None):
+        """Cached predicted (or confirmed) XI and its strength shift.
 
-        key = f"{team_id}:{as_of.isoformat()}"
-        if key not in self.absence_impacts:
+        The XI is what the adjustment is built from, rather than the squad. A
+        striker who has not played in six weeks has near-zero start propensity,
+        so he is simply not in the eleven and cannot inflate the team's rate --
+        which a squad-wide, minutes-weighted average lets him do all season.
+        """
+        from bet.availability import absences_from_store
+        from bet.lineups import lineup_strength_shift, predict_lineup
+
+        key = f"{team_id}:{match_id}:{as_of.isoformat()}"
+        if key not in self.lineups:
             absences = absences_from_store(store, as_of, team_id)
-            self.absence_impacts[key] = estimate_absence_impact(
-                self.player_rates, team_id, absences)
-        return self.absence_impacts[key]
+            lineup = predict_lineup(store, team_id, as_of, match_id=match_id,
+                                    absences=absences)
+            shift = lineup_strength_shift(store, team_id, as_of,
+                                          self.player_rates, lineup)
+            self.lineups[key] = (lineup, shift)
+        return self.lineups[key]
 
     def _apply_availability(self, store, as_of: datetime, home: str, away: str,
-                            lam: float, mu: float) -> tuple[float, float]:
-        """Shift both rates for who is missing on each side.
+                            lam: float, mu: float,
+                            match_id: str | None = None) -> tuple[float, float]:
+        """Shift both rates for the elevens expected to play.
 
-        Rates are exponential in the parameters, so an absence is an additive
-        shift on the log scale. A team losing attackers scores less; a team
-        losing defenders concedes more, which raises the *opponent's* rate --
-        hence the opposite sign on the defence term.
+        Rates are exponential in the parameters, so this is an additive shift on
+        the log scale. A weakened attack scores less; a weakened defence lets the
+        *opponent* score more, hence the opposite sign on the defence term.
+
+        The shift is measured against the team's own recent line-ups, not an
+        absolute scale, because the fitted parameters already encode how good
+        this side usually is. Comparing against an absolute would double-count
+        team quality and move every fixture.
         """
-        home_impact = self._absence_impact(store, as_of, home)
-        away_impact = self._absence_impact(store, as_of, away)
+        _, home_shift = self._lineup_for(store, as_of, home, match_id)
+        _, away_shift = self._lineup_for(store, as_of, away, match_id)
 
-        log_lam = np.log(lam) + home_impact.attack_log_shift - away_impact.defence_log_shift
-        log_mu = np.log(mu) + away_impact.attack_log_shift - home_impact.defence_log_shift
-        # Clipped for the same reason the rates are clipped during fitting: a
-        # long injury list must not be able to produce an absurd scoreline.
+        log_lam = (np.log(lam) + home_shift["attack_shift"]
+                   - away_shift["defence_shift"])
+        log_mu = (np.log(mu) + away_shift["attack_shift"]
+                  - home_shift["defence_shift"])
+        # Clipped as during fitting: a long injury list must not be able to
+        # produce an absurd scoreline.
         return float(np.exp(np.clip(log_lam, -3.0, 2.5))), float(np.exp(np.clip(log_mu, -3.0, 2.5)))
 
     def _rates(self, home: str, away: str) -> tuple[float, float]:

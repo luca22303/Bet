@@ -52,6 +52,7 @@ class MatchRecommendation:
     value_bets: list[dict] = field(default_factory=list)
     absences: dict[str, list[str]] = field(default_factory=dict)
     absence_effect: dict[str, float] = field(default_factory=dict)
+    lineups: dict[str, object] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -96,11 +97,18 @@ class MatchdayBrief:
                 lines.append("  market          " + "  ".join(
                     f"{o} {match.market_probabilities[o]:.1%}" for o in OUTCOMES))
 
-            for side, players in match.absences.items():
-                if players:
+            for side in ("home", "away"):
+                lineup = match.lineups.get(side)
+                if lineup is not None and lineup.starters:
                     effect = match.absence_effect.get(side, 1.0)
-                    lines.append(f"  absent ({side:<4})  {', '.join(players)} "
-                                 f"[attack x{effect:.3f}]")
+                    source = "CONFIRMED" if lineup.is_confirmed else f"predicted {lineup.confidence:.0%}"
+                    lines.append(f"  XI ({side:<4})      {lineup.formation} [{source}]  "
+                                 f"attack x{effect:.3f}")
+                    for note in lineup.notes:
+                        lines.append(f"                  {note}")
+                players = match.absences.get(side, [])
+                if players:
+                    lines.append(f"  absent ({side:<4})  {', '.join(players)}")
 
             if match.value_bets:
                 for bet in match.value_bets:
@@ -201,13 +209,17 @@ def _recommend_match(store, model: DixonColesModel, fixture, as_of: datetime,
 
     absences: dict[str, list[str]] = {}
     effects: dict[str, float] = {}
+    lineups: dict[str, object] = {}
     if use_availability:
         lam, mu = model._apply_availability(
-            store, as_of, fixture.home_team_id, fixture.away_team_id, lam, mu)
+            store, as_of, fixture.home_team_id, fixture.away_team_id, lam, mu,
+            match_id=fixture.match_id)
+        from bet.availability import absences_from_store
         for side, team_id in (("home", fixture.home_team_id), ("away", fixture.away_team_id)):
-            impact = model._absence_impact(store, as_of, team_id)
-            absences[side] = list(impact.absent_players)
-            effects[side] = impact.attack_multiplier
+            lineup, shift = model._lineup_for(store, as_of, team_id, fixture.match_id)
+            lineups[side] = lineup
+            absences[side] = sorted(absences_from_store(store, as_of, team_id))
+            effects[side] = shift["attack_ratio"]
 
     from bet.models.dixon_coles import match_probabilities
     probs = match_probabilities(lam, mu, model.params.rho)
@@ -225,6 +237,7 @@ def _recommend_match(store, model: DixonColesModel, fixture, as_of: datetime,
                    for o, p in probabilities.items()},
         absences=absences,
         absence_effect=effects,
+        lineups=lineups,
     )
 
     match_odds = odds[odds["match_id"] == fixture.match_id] if not odds.empty else pd.DataFrame()

@@ -80,6 +80,10 @@ bet scout --team bayern_munich            # shot profile and spatial summary
 bet news --file news.txt --team bayern_munich   # extract availability (local LLM)
 bet brief --days 8                        # the matchday recommendations
 bet quality                               # reconciliation and coverage checks
+bet lineup --team bayern_munich           # predicted XI, formation, rotation
+bet fetch-news                            # pull news from several feeds and extract
+bet watch                                 # T-60 line-up check and repricing
+bet dashboard --out board.html            # static HTML overview
 ```
 
 Ingest `football_data` first — it carries results *and* historical closing odds
@@ -120,7 +124,10 @@ src/bet/
   players.py         canonical player ids; name matching across sources
   availability.py    absence impact, estimated from squad data
   quality.py         reconciliation, coverage, staleness
+  lineups.py         start propensity, formation, predicted XI
+  matchday.py        T-60 confirmed-line-up check and repricing
   recommend.py       the matchday brief
+  dashboard.py       static HTML overview
   extract/           LLM extraction: Ollama (default) and Claude backends
   models/            Model contract, baselines, Dixon-Coles, promoted prior, props
   spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
@@ -233,6 +240,78 @@ What the shot profile is genuinely good for: two sides with identical season xG
 are not equally good if one gets there by volume. `xg_per_shot`,
 `share_in_box` and `mean_distance_m` tell them apart, and no aggregate xG total
 will.
+
+## The dashboard
+
+`bet dashboard` writes a single self-contained HTML file — no server, nothing to
+deploy, openable from disk or mailed to someone. It shows fixtures with model
+probabilities, expected goals, fair odds, market prices and value bets; the
+predicted or confirmed XI for each side with its formation; who is out; the top
+player props; data coverage; and any quality warnings.
+
+It deliberately shows what the system *doesn't* know alongside what it does —
+whether an XI is confirmed or guessed, how much evidence sits behind a prop,
+whether market prices existed to compare against. A dashboard that only shows
+conclusions invites more confidence than the numbers deserve.
+
+## Predicted line-ups
+
+The fix for a specific, expensive bug: team strength was computed from
+squad-wide per-90 rates weighted by **cumulative** minutes. A striker who played
+every week until September and hasn't appeared since still holds a large share
+of the season's minutes, so the model kept pricing the team as though he plays —
+while the squad player who has started the last six matches barely registered.
+
+Strength now comes from the eleven expected to start:
+
+- **Start propensity** — an exponentially recency-weighted start rate
+  (21-day half-life). A player who started the last five matches scores near
+  one; one who hasn't featured in six weeks scores near zero, whatever he
+  banked in August. In the test case, two players with ten starts each score
+  0.09 and 0.55 depending purely on *when* those starts happened.
+- **Formation** — inferred from who is actually on the pitch, since sources
+  disagree on formation strings and FBref supplies none. The predicted shape
+  constrains the XI: a side playing 3-4-3 fields three centre-backs, so the
+  eleven can't just be the eleven highest propensities.
+- **Rotation** — mean churn between consecutive line-ups. A manager who names
+  the same team every week scores near zero; that number *is* the confidence in
+  any predicted XI, and it's reported rather than hidden.
+
+A confirmed XI replaces the prediction outright. It isn't evidence to blend with
+a guess — it's the answer.
+
+One bug worth recording: scaling an unavailable player's propensity to zero
+wasn't enough to remove him. Sorting alone still returned him, so when every
+forward was ruled out the top three were three ruled-out forwards and the
+absence silently had no effect. Ineligible players now leave the pool entirely.
+
+## The T-60 workflow
+
+`bet watch` polls for fixtures about an hour from kickoff, fetches the confirmed
+line-up, re-prices, and reports what moved. The "before" price is a fresh
+prediction from the same model with confirmed line-ups switched off, so team
+news is the *only* thing that differs between the two numbers.
+
+The diff is the useful part. A price that barely moves means the model had
+already priced the XI correctly and there's nothing to act on. A large move
+means it was pricing a striker who's on the bench, and the new number is the one
+to trust.
+
+This does not assume you'll beat the market to the news — books move within
+seconds of an XI dropping and suspend markets while they do.
+
+## Automatic news collection
+
+`bet fetch-news` pulls from several independent feeds (kicker, bundesliga.com,
+Sportschau, Guardian — German and English, different kinds of publisher) and
+hands each article to the extraction pipeline. Diversity is the point: a club
+channel buries what it would rather not report, an aggregator lags, a tabloid
+over-reports a knock.
+
+A relevance gate keeps the local model off match reports and transfer gossip.
+Articles naming two clubs with no clear subject are **not** attributed — a
+preview mentioning both sides isn't team news about either, and guessing would
+attach one club's injury list to its opponent.
 
 ## Player availability
 
@@ -350,10 +429,10 @@ Closing line value converges in weeks instead of years.
 
 ## Not yet built
 
-- **Dashboard** — nothing visual exists yet; the spatial and brief layers
-  produce the data it would render
 - Live odds ingestion and +EV alerting
-- A news *fetcher* — `bet news` reads a file you supply; nothing crawls sources
+- A scheduler — `bet watch` is one polling pass, meant for cron
+- Line-up *fetching* — the T-60 workflow and the kicker parser exist, but the
+  parser is unverified against live HTML (see below)
 - Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
@@ -363,6 +442,6 @@ Closing line value converges in weeks instead of years.
 make test
 ```
 
-256 tests, no network required. Synthetic seasons are generated from known team
+297 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.

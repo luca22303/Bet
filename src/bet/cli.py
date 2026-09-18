@@ -10,6 +10,10 @@
     bet news --team bayern_munich   extract availability from a news file (local LLM)
     bet brief                       compile the matchday recommendations
     bet quality                     data quality and cross-source reconciliation
+    bet lineup --team bayern_munich predicted XI, formation and rotation
+    bet fetch-news                  pull team news from several feeds and extract
+    bet watch                       T-60 line-up check and repricing
+    bet dashboard --out board.html  static HTML overview
     bet status                      row counts and the leakage check
     bet check                       point-in-time integrity only
 """
@@ -372,6 +376,156 @@ def cmd_quality(args) -> int:
         return 0 if report.passed else 1
 
 
+def cmd_lineup(args) -> int:
+    """Predicted XI, formation and rotation for a team."""
+    from bet.availability import absences_from_store
+    from bet.lineups import lineup_strength_shift, predict_lineup, start_propensity
+
+    as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.utcnow()
+
+    with Store.open(args.db, read_only=True) as store:
+        propensity = start_propensity(store, args.team, as_of)
+        if propensity.empty:
+            print(f"no appearance data for {args.team} - run: bet ingest --source fbref")
+            return 1
+
+        absences = absences_from_store(store, as_of, args.team)
+        lineup = predict_lineup(store, args.team, as_of, absences=absences)
+
+        print(f"{lineup.describe()}  (as of {as_of:%Y-%m-%d %H:%M} UTC)")
+        print(f"  formation confidence {lineup.formation_confidence:.0%}, "
+              f"rotation {lineup.rotation_score:.0%}")
+        if absences:
+            print(f"  unavailable: {', '.join(sorted(absences))}")
+        for note in lineup.notes:
+            print(f"  note: {note}")
+
+        print()
+        starters = propensity[propensity["player_id"].isin(lineup.starters)]
+        print("predicted XI")
+        print(starters[["player_id", "group", "propensity", "days_since_start"]]
+              .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+
+        if args.all:
+            print()
+            print("full squad by start propensity")
+            print(propensity[["player_id", "group", "propensity", "days_since_start",
+                              "starts", "appearances"]]
+                  .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+
+        rates = store.player_rates_as_of(as_of, min_minutes=0.0)
+        shift = lineup_strength_shift(store, args.team, as_of, rates, lineup)
+        print()
+        print(f"strength vs this team's recent XIs: "
+              f"attack x{shift['attack_ratio']:.3f}, defence x{shift['defence_ratio']:.3f} "
+              f"(over {shift['baseline_matches']} matches)")
+        print("Players who have not featured recently carry near-zero propensity,")
+        print("so they are not in the XI and cannot inflate the team's rate.")
+    return 0
+
+
+def cmd_fetch_news(args) -> int:
+    """Pull team news from several feeds and extract availability."""
+    from bet.extract import OllamaBackend, extract_and_verify, to_availability_rows
+    from bet.ingest.news import NewsSource, group_by_team
+
+    with Store.open(args.db) as store:
+        store.init_schema()
+
+        source = NewsSource(store)
+        articles = source.fetch_articles(since_days=args.days,
+                                         relevant_only=not args.all_articles)
+        print(f"{len(articles)} relevant article(s) from {len(source.articles or [])} fetched")
+
+        grouped = group_by_team(articles)
+        unattributed = len(articles) - sum(len(v) for v in grouped.values())
+        print(f"{len(grouped)} team(s) identified, {unattributed} article(s) unattributable\n")
+        if not grouped:
+            return 0
+
+        if args.no_extract:
+            for team_id, items in sorted(grouped.items()):
+                print(f"{team_id}:")
+                for article in items:
+                    print(f"  [{article.source}] {article.title}")
+            return 0
+
+        backend = OllamaBackend(model=args.model, host=args.host)
+        healthy, message = backend.health()
+        if not healthy:
+            print(f"LLM backend unavailable: {message}")
+            print(f"\n  ollama serve && ollama pull {args.model}")
+            print("\nRe-run with --no-extract to list the articles without extracting.")
+            return 1
+        print(f"backend: {message}\n")
+
+        written = 0
+        for team_id, items in sorted(grouped.items()):
+            squad = store.squad_as_of(datetime.utcnow(), team_id)
+            if not squad:
+                print(f"{team_id}: no squad on record, skipped")
+                continue
+
+            for article in items:
+                result = extract_and_verify(
+                    backend, article.text, team_id, article.published_at,
+                    list(squad.values()), min_confidence=args.min_confidence)
+                rows = to_availability_rows(result, store, team_id, article.published_at,
+                                            source=f"news:{article.source}")
+                if not rows.empty:
+                    written += store.upsert("player_availability", rows,
+                                            ["player_id", "source", "known_at"])
+                for entry in result.accepted:
+                    print(f"  {team_id}: {entry.player_name} -> {entry.status.value} "
+                          f"({entry.source_confidence:.2f}) [{article.source}]")
+
+        print(f"\n{written} availability row(s) written")
+    return 0
+
+
+def cmd_watch(args) -> int:
+    """Check for confirmed line-ups and reprice."""
+    from bet.matchday import format_moves, run_matchday_check
+
+    now = datetime.fromisoformat(args.now) if args.now else datetime.utcnow()
+
+    with Store.open(args.db, read_only=True) as store:
+        moves = run_matchday_check(store, now, lead_minutes=args.lead,
+                                   tolerance_minutes=args.tolerance,
+                                   league=args.league)
+        print(format_moves(moves))
+
+        material = [m for m in moves if m.is_material]
+        if material and args.narrate:
+            from bet.extract import OllamaBackend
+            backend = OllamaBackend(model=args.model, host=args.host)
+            healthy, message = backend.health()
+            if healthy:
+                print("\n" + "=" * 72)
+                print(backend.generate_text(
+                    "You summarise football line-up news in two or three plain "
+                    "sentences. Report only the numbers given; never recalculate.",
+                    "\n".join(m.describe() for m in material)))
+    # Nothing to act on is a normal result, not a failure.
+    return 0
+
+
+def cmd_dashboard(args) -> int:
+    """Generate the static HTML dashboard."""
+    from bet.dashboard import build
+
+    as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.utcnow()
+    with Store.open(args.db, read_only=True) as store:
+        page = build(store, as_of, days=args.days, league=args.league,
+                     include_quality=not args.no_quality)
+
+    out = Path(args.out)
+    out.write_text(page, encoding="utf-8")
+    print(f"wrote {out.resolve()} ({len(page) / 1024:.0f} KB)")
+    print("Open it in a browser; it is self-contained, so there is nothing to serve.")
+    return 0
+
+
 def _print_leakage(store) -> None:
     report = store.leakage_report()
     total = int(report["violations"].sum())
@@ -491,6 +645,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_quality = sub.add_parser("quality", help="data quality and reconciliation")
     p_quality.add_argument("--seasons-expected", type=int, default=None)
     p_quality.set_defaults(func=cmd_quality)
+
+    p_lineup = sub.add_parser("lineup", help="predicted XI, formation and rotation")
+    p_lineup.add_argument("--team", required=True)
+    p_lineup.add_argument("--as-of", dest="as_of", default=None)
+    p_lineup.add_argument("--all", action="store_true", help="show the whole squad")
+    p_lineup.set_defaults(func=cmd_lineup)
+
+    p_fetch = sub.add_parser("fetch-news", help="pull team news and extract availability")
+    p_fetch.add_argument("--days", type=int, default=5)
+    p_fetch.add_argument("--model", default="qwen2.5:7b-instruct")
+    p_fetch.add_argument("--host", default="http://localhost:11434")
+    p_fetch.add_argument("--min-confidence", type=float, default=0.5)
+    p_fetch.add_argument("--all-articles", action="store_true",
+                         help="skip the injury-relevance filter")
+    p_fetch.add_argument("--no-extract", action="store_true",
+                         help="list articles without running the LLM")
+    p_fetch.set_defaults(func=cmd_fetch_news)
+
+    p_watch = sub.add_parser("watch", help="T-60 line-up check and repricing")
+    p_watch.add_argument("--lead", type=int, default=60,
+                         help="minutes before kickoff to check")
+    p_watch.add_argument("--tolerance", type=int, default=20,
+                         help="window width in minutes")
+    p_watch.add_argument("--now", default=None, help="override the current time (ISO)")
+    p_watch.add_argument("--league", default="bundesliga")
+    p_watch.add_argument("--narrate", action="store_true")
+    p_watch.add_argument("--model", default="qwen2.5:7b-instruct")
+    p_watch.add_argument("--host", default="http://localhost:11434")
+    p_watch.set_defaults(func=cmd_watch)
+
+    p_dash = sub.add_parser("dashboard", help="generate the static HTML dashboard")
+    p_dash.add_argument("--out", default="dashboard.html")
+    p_dash.add_argument("--as-of", dest="as_of", default=None)
+    p_dash.add_argument("--days", type=int, default=8)
+    p_dash.add_argument("--league", default="bundesliga")
+    p_dash.add_argument("--no-quality", action="store_true")
+    p_dash.set_defaults(func=cmd_dashboard)
 
     p_status = sub.add_parser("status", help="row counts and integrity check")
     p_status.set_defaults(func=cmd_status)
