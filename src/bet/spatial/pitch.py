@@ -1,0 +1,167 @@
+"""Spatial aggregation: shot maps, zone heatmaps, field tilt.
+
+Built for looking at, not for feeding the forecast. That distinction is
+deliberate and worth stating plainly, because the temptation runs the other way.
+
+A binned heatmap is roughly fifty numbers per team per match. Bundesliga
+produces 306 matches a season. Handing fifty weakly-informative spatial features
+to a model trained on that little data is a fast route to overfitting, and
+almost everything a touch map says about attacking quality is already inside xG,
+with less noise. So these functions serve the dashboard and scouting questions --
+where does this side build, has that full-back moved inside, is a team's xG
+coming from good positions or from hopeful shots -- and the forecast keeps
+reading xG.
+
+The one spatial number that does earn a place as a model feature is field tilt:
+a single scalar, well sampled, measuring territorial dominance in a way that
+possession share does not.
+
+Coordinates follow Understat's convention: x and y in [0, 1], x = 0 at the
+defending goal line and x = 1 at the attacking one, always from the shooting
+team's perspective.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+# Pitch thirds by x, and channels by y. Coarse on purpose: finer bins give the
+# appearance of precision that this data does not support.
+ZONES = {
+    "defensive_third": (0.0, 1 / 3),
+    "middle_third": (1 / 3, 2 / 3),
+    "final_third": (2 / 3, 1.0),
+}
+
+PITCH_LENGTH_M = 105.0
+PITCH_WIDTH_M = 68.0
+
+
+def zone_of(x: float) -> str:
+    """Which third of the pitch an x coordinate falls in."""
+    if x is None or not np.isfinite(x):
+        return "unknown"
+    if x < 1 / 3:
+        return "defensive_third"
+    if x < 2 / 3:
+        return "middle_third"
+    return "final_third"
+
+
+def bin_heatmap(events: pd.DataFrame, *, x_col: str = "x", y_col: str = "y",
+                x_bins: int = 6, y_bins: int = 5, normalise: bool = True) -> np.ndarray:
+    """Bin events into a coarse pitch grid.
+
+    Returns an (x_bins, y_bins) array, normalised to sum to one so that maps
+    from teams with different event counts can be compared directly.
+    """
+    if events.empty or x_col not in events.columns or y_col not in events.columns:
+        return np.zeros((x_bins, y_bins))
+
+    valid = events[[x_col, y_col]].dropna()
+    if valid.empty:
+        return np.zeros((x_bins, y_bins))
+
+    x = np.clip(valid[x_col].to_numpy(dtype=float), 0.0, 0.999999)
+    y = np.clip(valid[y_col].to_numpy(dtype=float), 0.0, 0.999999)
+
+    grid, _, _ = np.histogram2d(x, y, bins=[x_bins, y_bins], range=[[0, 1], [0, 1]])
+    if normalise and grid.sum() > 0:
+        grid = grid / grid.sum()
+    return grid
+
+
+def field_tilt(events: pd.DataFrame, team_col: str = "team_id", x_col: str = "x",
+               threshold: float = 2 / 3) -> pd.Series:
+    """Share of all final-third events belonging to each team.
+
+    Territorial dominance. Unlike possession share it does not reward a side for
+    passing along its own back line, which is why it survives as a feature while
+    the rest of the heatmap does not.
+    """
+    if events.empty or x_col not in events.columns:
+        return pd.Series(dtype=float)
+
+    final_third = events[events[x_col] >= threshold]
+    if final_third.empty:
+        return pd.Series(dtype=float)
+
+    counts = final_third.groupby(team_col).size()
+    return counts / counts.sum()
+
+
+def shot_map(shots: pd.DataFrame, team_id: str | None = None) -> pd.DataFrame:
+    """Shots with distance, angle and zone attached.
+
+    Distance and angle are what actually drive an xG estimate, so recovering
+    them makes it possible to ask whether a team's xG comes from good positions
+    or from a high volume of hopeful ones -- two very different teams that look
+    identical in a season xG total.
+    """
+    if shots.empty:
+        return shots
+
+    frame = shots if team_id is None else shots[shots["team_id"] == team_id]
+    frame = frame.dropna(subset=["x", "y"]).copy()
+    if frame.empty:
+        return frame
+
+    # Goal centre is (1.0, 0.5) in normalised coordinates.
+    dx = (1.0 - frame["x"]) * PITCH_LENGTH_M
+    dy = (frame["y"] - 0.5) * PITCH_WIDTH_M
+    frame["distance_m"] = np.sqrt(dx ** 2 + dy ** 2)
+
+    # Angle subtended by the 7.32m goal mouth from the shot location. Wider is
+    # better, and it collapses toward zero from tight angles regardless of distance.
+    goal_half = 7.32 / 2.0
+    left = np.arctan2(goal_half - dy, np.maximum(dx, 1e-6))
+    right = np.arctan2(-goal_half - dy, np.maximum(dx, 1e-6))
+    frame["angle_rad"] = np.abs(left - right)
+    frame["angle_deg"] = np.degrees(frame["angle_rad"])
+    frame["zone"] = frame["x"].map(zone_of)
+    frame["is_box"] = (frame["x"] >= 1 - 16.5 / PITCH_LENGTH_M) & (frame["y"].between(0.21, 0.79))
+    return frame
+
+
+def shot_profile(shots: pd.DataFrame, team_id: str | None = None) -> dict[str, float]:
+    """Summarise shot quality for a team.
+
+    `xg_per_shot` is the number to read first. Two sides with equal season xG
+    and very different xg_per_shot are not equally good: one is creating chances,
+    the other is shooting from distance and accumulating xG by volume.
+    """
+    mapped = shot_map(shots, team_id)
+    if mapped.empty:
+        return {"shots": 0}
+
+    total_xg = float(mapped["xg"].sum()) if "xg" in mapped.columns else float("nan")
+    n = len(mapped)
+    return {
+        "shots": n,
+        "total_xg": total_xg,
+        "xg_per_shot": total_xg / n if n else float("nan"),
+        "mean_distance_m": float(mapped["distance_m"].mean()),
+        "median_distance_m": float(mapped["distance_m"].median()),
+        "mean_angle_deg": float(mapped["angle_deg"].mean()),
+        "share_in_box": float(mapped["is_box"].mean()),
+        "share_beyond_20m": float((mapped["distance_m"] > 20).mean()),
+    }
+
+
+def heatmap_to_frame(grid: np.ndarray) -> pd.DataFrame:
+    """Long-format grid, ready to plot."""
+    x_bins, y_bins = grid.shape
+    rows = [
+        {
+            "x_bin": i,
+            "y_bin": j,
+            "x_centre": (i + 0.5) / x_bins,
+            "y_centre": (j + 0.5) / y_bins,
+            "zone": zone_of((i + 0.5) / x_bins),
+            "share": float(grid[i, j]),
+        }
+        for i in range(x_bins)
+        for j in range(y_bins)
+    ]
+    return pd.DataFrame(rows)

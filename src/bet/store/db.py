@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -192,6 +192,183 @@ class Store:
             "SELECT * FROM shot WHERE known_at <= ? ORDER BY match_id, minute", [as_of]
         ).df()
 
+    # ------------------------------------------------- point-in-time: players
+
+    def player_stats_as_of(self, as_of: datetime, *, player_ids: list[str] | None = None,
+                           since: datetime | None = None) -> pd.DataFrame:
+        """Per-match player lines that were public by `as_of`.
+
+        `since` restricts to a recent window, which is what form-sensitive rates
+        want: a striker's shot rate two seasons ago says less than his rate over
+        the last ten matches.
+        """
+        where = ["s.known_at <= ?"]
+        params: list = [as_of]
+        if since is not None:
+            where.append("s.known_at >= ?")
+            params.append(since)
+        if player_ids is not None:
+            if not player_ids:
+                return pd.DataFrame()
+            placeholders = ", ".join("?" for _ in player_ids)
+            where.append(f"s.player_id IN ({placeholders})")
+            params.extend(player_ids)
+
+        sql = f"""
+            SELECT s.*, m.kickoff_utc, m.season,
+                   CASE WHEN s.team_id = m.home_team_id
+                        THEN m.away_team_id ELSE m.home_team_id END AS opponent_id,
+                   s.team_id = m.home_team_id AS at_home
+            FROM player_match_stat s
+            JOIN match m ON m.match_id = s.match_id
+            WHERE {' AND '.join(where)}
+            ORDER BY m.kickoff_utc
+        """
+        return self.con.execute(sql, params).df()
+
+    def player_rates_as_of(self, as_of: datetime, *, lookback_days: int = 540,
+                           min_minutes: float = 180.0) -> pd.DataFrame:
+        """Per-90 rates per player, rebuilt from the matches knowable at `as_of`.
+
+        Computed from per-match rows rather than read from a stored season total,
+        which is the only way the number can be correct for a past date.
+        """
+        since = as_of - timedelta(days=lookback_days)
+        stats = self.player_stats_as_of(as_of, since=since)
+        if stats.empty:
+            return pd.DataFrame()
+
+        counting = ["goals", "assists", "shots", "shots_on_target", "xg", "npxg", "xa",
+                    "tackles", "interceptions", "blocks", "fouls",
+                    "yellow_cards", "red_cards", "progressive_passes", "touches"]
+        present = [c for c in counting if c in stats.columns]
+
+        grouped = stats.groupby("player_id").agg(
+            team_id=("team_id", "last"),
+            position=("position", "last"),
+            matches=("match_id", "nunique"),
+            starts=("started", "sum"),
+            minutes=("minutes", "sum"),
+            **{c: (c, "sum") for c in present},
+        ).reset_index()
+
+        grouped = grouped[grouped["minutes"] >= min_minutes].copy()
+        if grouped.empty:
+            return grouped
+
+        per90 = grouped["minutes"] / 90.0
+        for column in present:
+            grouped[f"{column}_p90"] = grouped[column] / per90
+        grouped["minutes_per_match"] = grouped["minutes"] / grouped["matches"]
+        grouped["start_rate"] = grouped["starts"] / grouped["matches"]
+        return grouped
+
+    def team_concessions_as_of(self, as_of: datetime, *, lookback_days: int = 540,
+                               columns: tuple[str, ...] = ("shots", "shots_on_target",
+                                                           "fouls", "yellow_cards")) -> pd.DataFrame:
+        """What each team allows opponents, per match.
+
+        The opponent adjustment for a player prop: a striker facing a defence
+        that concedes 16 shots a game is in a different market from the same
+        striker facing one that concedes 8.
+        """
+        since = as_of - timedelta(days=lookback_days)
+        stats = self.player_stats_as_of(as_of, since=since)
+        if stats.empty:
+            return pd.DataFrame()
+
+        present = [c for c in columns if c in stats.columns]
+        if not present:
+            return pd.DataFrame()
+
+        by_match = stats.groupby(["match_id", "opponent_id"])[present].sum().reset_index()
+        conceded = by_match.groupby("opponent_id").agg(
+            matches=("match_id", "nunique"),
+            **{c: (c, "sum") for c in present},
+        ).reset_index().rename(columns={"opponent_id": "team_id"})
+
+        for column in present:
+            conceded[f"{column}_conceded_per_match"] = conceded[column] / conceded["matches"]
+        return conceded
+
+    def lineup_as_of(self, as_of: datetime, match_ids: list[str] | None = None,
+                     *, confirmed_only: bool = False) -> pd.DataFrame:
+        """Most recent line-up report per match and player, knowable at `as_of`.
+
+        A predicted XI published on Thursday and the confirmed XI an hour before
+        kickoff are both stored; this returns whichever was latest at `as_of`.
+        """
+        where = ["known_at <= ?"]
+        params: list = [as_of]
+        if confirmed_only:
+            where.append("is_confirmed")
+        if match_ids is not None:
+            if not match_ids:
+                return pd.DataFrame()
+            placeholders = ", ".join("?" for _ in match_ids)
+            where.append(f"match_id IN ({placeholders})")
+            params.extend(match_ids)
+
+        sql = f"""
+            SELECT match_id, player_id, team_id, source, is_starter,
+                   is_confirmed, shirt_number, formation, known_at
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY match_id, player_id
+                    ORDER BY is_confirmed DESC, known_at DESC
+                ) AS rn
+                FROM lineup
+                WHERE {' AND '.join(where)}
+            )
+            WHERE rn = 1
+        """
+        return self.con.execute(sql, params).df()
+
+    def availability_as_of(self, as_of: datetime, *, team_id: str | None = None) -> pd.DataFrame:
+        """Latest known status per player at `as_of`.
+
+        Reports supersede each other, so only the most recent per player counts;
+        a Tuesday "doubtful" is irrelevant once Friday says "fit".
+        """
+        where = ["known_at <= ?"]
+        params: list = [as_of]
+        if team_id:
+            where.append("team_id = ?")
+            params.append(team_id)
+        sql = f"""
+            SELECT player_id, team_id, source, status, reason,
+                   expected_return, confidence, known_at
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY player_id ORDER BY known_at DESC
+                ) AS rn
+                FROM player_availability
+                WHERE {' AND '.join(where)}
+            )
+            WHERE rn = 1
+        """
+        return self.con.execute(sql, params).df()
+
+    def squad_as_of(self, as_of: datetime, team_id: str, *,
+                    lookback_days: int = 400) -> dict[str, str]:
+        """player_id -> full name for a team's recent squad.
+
+        The lookup `resolve_within_squad` needs to turn a surname in a line-up
+        listing into a known player.
+        """
+        since = as_of - timedelta(days=lookback_days)
+        rows = self.con.execute(
+            """
+            SELECT DISTINCT s.player_id, p.full_name
+            FROM player_match_stat s
+            JOIN match m ON m.match_id = s.match_id
+            LEFT JOIN player p ON p.player_id = s.player_id
+            WHERE s.team_id = ? AND s.known_at <= ? AND s.known_at >= ?
+            """,
+            [team_id, as_of, since],
+        ).df()
+        return {r.player_id: (r.full_name or r.player_id) for r in rows.itertuples()}
+
     # ------------------------------------------------------------ diagnostics
 
     def leakage_report(self) -> pd.DataFrame:
@@ -213,6 +390,14 @@ class Store:
             ("shot", """
                 SELECT COUNT(*) FROM shot s JOIN match m USING (match_id)
                 WHERE s.known_at < m.kickoff_utc
+            """),
+            ("player_match_stat", """
+                SELECT COUNT(*) FROM player_match_stat s JOIN match m USING (match_id)
+                WHERE s.known_at < m.kickoff_utc
+            """),
+            ("lineup", """
+                SELECT COUNT(*) FROM lineup l JOIN match m USING (match_id)
+                WHERE l.known_at > m.kickoff_utc
             """),
         ]
         rows = [{"table": name, "violations": self.con.execute(sql).fetchone()[0]} for name, sql in checks]

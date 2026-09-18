@@ -101,6 +101,91 @@ CREATE TABLE IF NOT EXISTS prediction (
     PRIMARY KEY (match_id, model, as_of)
 );
 
+-- Player registry. Squads turn over constantly, so a name appearing for the
+-- first time is a signing, not an error.
+CREATE TABLE IF NOT EXISTS player (
+    player_id  VARCHAR PRIMARY KEY,
+    full_name  VARCHAR NOT NULL,
+    source     VARCHAR,
+    source_id  VARCHAR,
+    known_at   TIMESTAMP NOT NULL
+);
+
+-- Per-match player lines, NOT season totals.
+--
+-- This distinction is the whole reason the table looks like this. FBref serves
+-- cumulative season totals that are updated live, so a scrape today carries
+-- next week's matches inside it and is unusable for any backtest before the
+-- scrape date. Per-match rows carry known_at = final whistle, so a per-90 rate
+-- can be rebuilt as it stood on any past Saturday.
+CREATE TABLE IF NOT EXISTS player_match_stat (
+    match_id            VARCHAR NOT NULL,
+    player_id           VARCHAR NOT NULL,
+    team_id             VARCHAR NOT NULL,
+    source              VARCHAR NOT NULL,
+    position            VARCHAR,
+    started             BOOLEAN,
+    minutes             DOUBLE,
+    goals               DOUBLE,
+    assists             DOUBLE,
+    shots               DOUBLE,
+    shots_on_target     DOUBLE,
+    xg                  DOUBLE,
+    npxg                DOUBLE,
+    xa                  DOUBLE,
+    passes_completed    DOUBLE,
+    passes_attempted    DOUBLE,
+    progressive_passes  DOUBLE,
+    touches             DOUBLE,
+    carries             DOUBLE,
+    tackles             DOUBLE,
+    interceptions       DOUBLE,
+    blocks              DOUBLE,
+    fouls               DOUBLE,
+    yellow_cards        DOUBLE,
+    red_cards           DOUBLE,
+    known_at            TIMESTAMP NOT NULL,
+    PRIMARY KEY (match_id, player_id, source)
+);
+
+-- Confirmed and predicted line-ups.
+--
+-- The confirmed XI, roughly an hour before kickoff, is the only genuinely
+-- time-sensitive signal in this system. Predicted line-ups published earlier
+-- are stored alongside it with their own known_at and a lower confidence, so a
+-- backtest can ask what was knowable at any lead time.
+CREATE TABLE IF NOT EXISTS lineup (
+    match_id      VARCHAR NOT NULL,
+    player_id     VARCHAR NOT NULL,
+    team_id       VARCHAR NOT NULL,
+    source        VARCHAR NOT NULL,
+    is_starter    BOOLEAN NOT NULL,
+    is_confirmed  BOOLEAN NOT NULL DEFAULT FALSE,
+    shirt_number  INTEGER,
+    formation     VARCHAR,
+    known_at      TIMESTAMP NOT NULL,
+    PRIMARY KEY (match_id, player_id, source, known_at)
+);
+
+-- Injury and suspension reports. Append-only: a player's status changes over
+-- time and the history is what lets a backtest see what was known then.
+CREATE TABLE IF NOT EXISTS player_availability (
+    player_id        VARCHAR NOT NULL,
+    team_id          VARCHAR NOT NULL,
+    source           VARCHAR NOT NULL,
+    status           VARCHAR NOT NULL,   -- OUT / DOUBTFUL / FIT
+    reason           VARCHAR,
+    expected_return  DATE,
+    confidence       DOUBLE,
+    known_at         TIMESTAMP NOT NULL,
+    PRIMARY KEY (player_id, source, known_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pms_match ON player_match_stat (match_id);
+CREATE INDEX IF NOT EXISTS idx_pms_player ON player_match_stat (player_id, known_at);
+CREATE INDEX IF NOT EXISTS idx_lineup_match ON lineup (match_id);
+CREATE INDEX IF NOT EXISTS idx_avail_player ON player_availability (player_id, known_at);
+
 CREATE INDEX IF NOT EXISTS idx_match_kickoff ON match (kickoff_utc);
 CREATE INDEX IF NOT EXISTS idx_odds_match ON odds_quote (match_id, market);
 CREATE INDEX IF NOT EXISTS idx_shot_match ON shot (match_id);
@@ -108,4 +193,5 @@ CREATE INDEX IF NOT EXISTS idx_rating_team ON team_rating (team_id, valid_from);
 """
 
 # Tables that carry point-in-time facts, checked by the leakage guard.
-PIT_TABLES = ("match", "match_result", "odds_quote", "team_rating", "shot")
+PIT_TABLES = ("match", "match_result", "odds_quote", "team_rating", "shot",
+              "player", "player_match_stat", "lineup", "player_availability")

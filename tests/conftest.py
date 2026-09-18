@@ -155,3 +155,110 @@ def store_with_shots(store):
                      ["match_id", "book", "market", "selection", "quoted_at"])
         store.upsert("shot", generate_shots(matches, results, rng), ["shot_id"])
     return store
+
+
+# Squad archetypes: (suffix, position, shots per 90, start probability).
+SQUAD_TEMPLATE = [
+    ("gk", "GK", 0.05, 1.00),
+    ("cb1", "DF", 0.35, 0.95), ("cb2", "DF", 0.30, 0.90),
+    ("lb", "DF", 0.45, 0.85), ("rb", "DF", 0.50, 0.85),
+    ("dm", "MF", 0.70, 0.90), ("cm1", "MF", 1.10, 0.80), ("cm2", "MF", 1.30, 0.70),
+    ("am", "MF,FW", 2.10, 0.75), ("lw", "FW", 2.40, 0.70), ("rw", "FW", 2.30, 0.65),
+    ("st", "FW", 3.40, 0.85),
+    ("sub1", "MF", 1.20, 0.15), ("sub2", "FW", 2.00, 0.12), ("sub3", "DF", 0.30, 0.10),
+]
+
+
+def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
+                          source: str = "synthetic") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per-match player lines drawn from fixed per-90 rates.
+
+    Rates are known, so a prop model can be checked for recovering them rather
+    than merely for producing a number.
+    """
+    players, stats = [], []
+    seen: dict[str, str] = {}
+
+    for row in matches.itertuples(index=False):
+        for team_id in (row.home_team_id, row.away_team_id):
+            known_at = row.kickoff_utc + timedelta(
+                seconds=SETTINGS.result_known_after_seconds)
+
+            for suffix, position, shot_rate, start_prob in SQUAD_TEMPLATE:
+                player_id = f"{team_id}_{suffix}"
+                full_name = f"{suffix.upper()} {team_id.replace('_', ' ').title()}"
+                if player_id not in seen:
+                    seen[player_id] = full_name
+                    players.append({
+                        "player_id": player_id, "full_name": full_name,
+                        "source": source, "source_id": None, "known_at": known_at,
+                    })
+
+                started = rng.random() < start_prob
+                if started:
+                    minutes = float(rng.integers(60, 91))
+                elif rng.random() < 0.45:
+                    minutes = float(rng.integers(5, 35))
+                else:
+                    continue  # unused substitute
+
+                nineties = minutes / 90.0
+                shots = int(rng.poisson(shot_rate * nineties))
+                stats.append({
+                    "match_id": row.match_id, "player_id": player_id, "team_id": team_id,
+                    "source": source, "position": position, "started": started,
+                    "minutes": minutes,
+                    "goals": float(rng.binomial(shots, 0.11)) if shots else 0.0,
+                    "assists": float(rng.binomial(1, 0.08)),
+                    "shots": float(shots),
+                    "shots_on_target": float(rng.binomial(shots, 0.35)) if shots else 0.0,
+                    "xg": float(shots * rng.uniform(0.05, 0.14)),
+                    "npxg": float(shots * rng.uniform(0.04, 0.12)),
+                    "xa": float(rng.uniform(0.0, 0.25)),
+                    "passes_completed": float(rng.integers(10, 70)),
+                    "passes_attempted": float(rng.integers(15, 85)),
+                    "progressive_passes": float(rng.integers(0, 9)),
+                    "touches": float(rng.integers(20, 100)),
+                    "carries": float(rng.integers(10, 60)),
+                    "tackles": float(rng.poisson(1.4 * nineties)),
+                    "interceptions": float(rng.poisson(0.9 * nineties)),
+                    "blocks": float(rng.poisson(0.6 * nineties)),
+                    "fouls": float(rng.poisson(1.0 * nineties)),
+                    "yellow_cards": float(rng.binomial(1, 0.12)),
+                    "red_cards": 0.0,
+                    "known_at": known_at,
+                })
+
+    return pd.DataFrame(players), pd.DataFrame(stats)
+
+
+def lineup_rows_from_stats(stats: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
+    """Line-ups stamped at kickoff, as a confirmed XI would be."""
+    kickoffs = dict(zip(matches["match_id"], matches["kickoff_utc"]))
+    return pd.DataFrame([{
+        "match_id": r.match_id, "player_id": r.player_id, "team_id": r.team_id,
+        "source": "synthetic", "is_starter": bool(r.started), "is_confirmed": True,
+        "shirt_number": None, "formation": "4-2-3-1",
+        "known_at": kickoffs[r.match_id],
+    } for r in stats.itertuples()])
+
+
+@pytest.fixture
+def store_with_players(store):
+    """Three synthetic seasons with per-match player lines and line-ups."""
+    rng = np.random.default_rng(777)
+    for offset in range(3):
+        season_start = datetime(2021 + offset, 8, 10, 15, 30)
+        season = f"{2021 + offset}-{str(2022 + offset)[-2:]}"
+        matches, results, quotes = generate_season(season_start, season, rng)
+        store.upsert("match", matches, ["match_id"])
+        store.upsert("match_result", results, ["match_id"])
+        store.upsert("odds_quote", quotes,
+                     ["match_id", "book", "market", "selection", "quoted_at"])
+
+        players, stats = generate_player_stats(matches, rng)
+        store.upsert("player", players.drop_duplicates("player_id"), ["player_id"])
+        store.upsert("player_match_stat", stats, ["match_id", "player_id", "source"])
+        store.upsert("lineup", lineup_rows_from_stats(stats, matches),
+                     ["match_id", "player_id", "source", "known_at"])
+    return store

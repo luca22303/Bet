@@ -1,11 +1,11 @@
 # Bet — Bundesliga analytics
 
-A point-in-time data spine, a forecast backtesting harness, and a corrected
-Dixon-Coles engine for Bundesliga match prediction, built on free public data.
+A Bundesliga analytics platform built on free public data: a point-in-time data
+spine, a walk-forward backtesting harness, a corrected Dixon-Coles match engine,
+a player prop model, and spatial shot analysis.
 
-The harness came first on purpose. Every layer above it — the forecasting
-engine, and later the news/injury layer and +EV alerting — is worthless without
-a way to tell whether it works.
+The harness came first on purpose. Every layer above it is worthless without a
+way to tell whether it works.
 
 ## Why this layer first
 
@@ -74,6 +74,8 @@ bet check                                 # point-in-time integrity
 bet backtest --from 2018-08-01 --calibration
 bet tune --from 2018-08-01                # choose the decay rate empirically
 bet predict --days 10                     # price the next fixtures
+bet props --stat shots --days 7           # player prop prices
+bet scout --team bayern_munich            # shot profile and spatial summary
 ```
 
 Ingest `football_data` first — it carries results *and* historical closing odds
@@ -90,6 +92,8 @@ All free, no API keys.
 | ClubElo | cross-division power ratings | supplies the prior for promoted sides, which results-only models get badly wrong |
 | Understat | shot-level xG | converges far faster than goals on a 306-match season |
 | OpenLigaDB | fixtures, results, matchday structure | a plain public API, no scraping grey area |
+| FBref | per-match player lines (shots, xG, tackles, cards, minutes) | match pages, not season totals — see below |
+| kicker.de | predicted and confirmed XIs | forward-looking only; historical XIs come free from FBref |
 
 Scraped sources are rate-limited to one request every three seconds and every
 payload is archived to `data/raw/` before parsing, so a site changing its markup
@@ -104,7 +108,9 @@ src/bet/
   store/             DuckDB schema and point-in-time reads
   ingest/            source adapters (archive first, then parse)
   odds/devig.py      multiplicative / additive / power / Shin
-  models/            Model contract, baselines, Dixon-Coles, promoted-team prior
+  players.py         canonical player ids; name matching across sources
+  models/            Model contract, baselines, Dixon-Coles, promoted prior, props
+  spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
   evaluation/        RPS, log loss, Brier, calibration, walk-forward, CLV
   ev.py              expected value and Kelly, with tax made explicit
 ```
@@ -148,6 +154,73 @@ recovered as 0.2503 against a true 0.26, attack correlation 0.969, defence 0.980
 All markets derive from a single scoreline matrix, so the 1X2 price and the
 totals price can never imply different scorelines.
 
+## Player props
+
+The strategic reason this layer exists: 1X2 is the most efficient market in
+football and a public-data model is unlikely to beat it. Player props are priced
+far more loosely — there are hundreds per matchday and they need exactly the
+player-level data most bettors never assemble. That is where a player pipeline
+pays for itself, and it is not somewhere a team-level model can help.
+
+A prop count is built from four estimated pieces:
+
+```
+expected = per-90 rate × (minutes / 90) × opponent factor × volume factor
+```
+
+**Per-90 rates are shrunk** toward the position-group mean by empirical Bayes,
+with the shrinkage strength estimated from the league's between-player variance
+rather than chosen. A striker with one good match is priced at 2.5 shots, not 5.
+
+**Expected minutes is the largest driver and the one most often got wrong.** A
+confirmed XI collapses that uncertainty entirely, which is why the line-up
+matters more than any amount of form data.
+
+**Counts are negative binomial, not Poisson.** Overdispersion moves mass out of
+the middle into both tails, so the effect depends on where the line sits: near
+the mean it lowers the overs, in the upper tail it raises them sharply. At an
+expected 2.0 shots, Poisson prices over 5.5 at 1.7% and a negative binomial at
+5.0% — a factor of three, on exactly the alternative lines a book is least
+careful about.
+
+**Volume factor comes from the Dixon-Coles engine**, so a prop and the 1X2 price
+can never imply different things about the same fixture. Elasticity is below one:
+a team expected to score twice as much does not take twice as many shots.
+
+Read `sample_90s` in the output before trusting a price. A thin sample means the
+rate is mostly prior, not evidence.
+
+## Why per-match player rows, not season totals
+
+FBref serves cumulative season tables updated live, so a scrape taken today
+contains matches that had not been played on the date you want to backtest, and
+there is no way to subtract them back out. Per-match rows carry the final
+whistle as their `known_at`, so any past Saturday's per-90 rates rebuild exactly.
+
+One match page carries both squads across several stat tables, so a season costs
+~306 requests rather than ~500 player pages — and it yields the actual XI for
+free, which is where historical line-ups come from.
+
+## Spatial analysis — for looking at, not for the model
+
+`bet.spatial` produces shot maps with distance and angle, zone heatmaps, field
+tilt and shot-quality profiles. It feeds the dashboard and scouting questions,
+deliberately not the forecast.
+
+A binned heatmap is ~50 numbers per team per match against 306 matches a season.
+Handing that many weakly-informative spatial features to a model on that little
+data is a fast route to overfitting, and almost everything a touch map says about
+attacking quality is already inside xG with less noise.
+
+The exception is **field tilt** — a single well-sampled scalar measuring
+territorial dominance in a way possession share does not, which is why it is the
+one spatial quantity worth passing to a model.
+
+What the shot profile is genuinely good for: two sides with identical season xG
+are not equally good if one gets there by volume. `xg_per_shot`,
+`share_in_box` and `mean_distance_m` tell them apart, and no aggregate xG total
+will.
+
 ## Three things worth knowing
 
 **Devigging method changes the answer.** On a heavy favourite, multiplicative
@@ -168,9 +241,10 @@ Closing line value converges in weeks instead of years.
 
 ## Not yet built
 
-- LLM injury/news extraction with schema validation
+- LLM injury/news extraction with schema validation (the `player_availability`
+  table is in place and waiting for it)
 - Live odds ingestion and +EV alerting
-- Player-level prop modelling (where the softer markets are)
+- Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
 ## Testing
@@ -179,6 +253,6 @@ Closing line value converges in weeks instead of years.
 make test
 ```
 
-113 tests, no network required. Synthetic seasons are generated from known team
+199 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.

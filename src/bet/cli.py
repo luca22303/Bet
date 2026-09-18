@@ -5,6 +5,8 @@
     bet backtest --from 2018-08-01  walk models forward and score them
     bet tune --from 2018-08-01      choose the time-decay rate by out-of-sample score
     bet predict                     probabilities and fair odds for upcoming fixtures
+    bet props --stat shots          player prop prices for a fixture
+    bet scout --team bayern_munich  shot profile and spatial summary
     bet status                      row counts and the leakage check
     bet check                       point-in-time integrity only
 """
@@ -45,11 +47,13 @@ def cmd_ingest(args) -> int:
     from bet.ingest.clubelo import ClubEloSource
     from bet.ingest.football_data import FootballDataSource
     from bet.ingest.openligadb import OpenLigaDBSource
+    from bet.ingest.fbref import FBrefSource
     from bet.ingest.understat import UnderstatSource
 
     SETTINGS.ensure_dirs()
     seasons = _parse_season_range(args.seasons)
-    wanted = {"football_data", "clubelo", "understat", "openligadb"} if args.source == "all" else {args.source}
+    all_sources = {"football_data", "clubelo", "understat", "openligadb"}
+    wanted = all_sources if args.source == "all" else {args.source}
 
     with Store.open(args.db) as store:
         store.init_schema()
@@ -69,6 +73,11 @@ def cmd_ingest(args) -> int:
             print(f"understat (shots={'yes' if args.shots else 'no'})...")
             results.append(UnderstatSource(store).ingest(
                 seasons, league=args.league, with_shots=args.shots))
+        if "fbref" in wanted:
+            # One request per match page; a season is ~306 of them.
+            print("fbref player stats (slow: ~306 requests per season)...")
+            results.append(FBrefSource(store).ingest(
+                seasons, league=args.league, max_matches=args.max_matches))
 
         print()
         for result in results:
@@ -197,6 +206,85 @@ def cmd_predict(args) -> int:
     return 0
 
 
+def cmd_props(args) -> int:
+    """Price player props for a fixture."""
+    from bet.models.props import SUPPORTED_STATS, PlayerPropModel
+
+    as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.utcnow()
+
+    with Store.open(args.db, read_only=True) as store:
+        model = PlayerPropModel(stat=args.stat).fit(store, as_of)
+        if model.rates.empty:
+            print("no player data - run: bet ingest --source fbref --seasons 2022-2026")
+            return 1
+
+        fixtures = store.fixtures_between(as_of, as_of + timedelta(days=args.days),
+                                          league=args.league)
+        if fixtures.empty:
+            print(f"no fixtures in the next {args.days} days")
+            return 1
+
+        # Expected goals come from the match model, so the prop and the 1X2
+        # price cannot imply different things about the same fixture.
+        match_model = DixonColesModel(xi=args.xi).fit(store, as_of)
+
+        line = args.line if args.line is not None else SUPPORTED_STATS[args.stat]
+        print(f"{args.stat} over {line}  (as of {as_of:%Y-%m-%d %H:%M} UTC)\n")
+
+        for fixture in fixtures.itertuples(index=False):
+            home_xg = away_xg = None
+            if match_model.params is not None:
+                home_xg, away_xg = match_model._rates(fixture.home_team_id, fixture.away_team_id)
+
+            frame = model.predict_match(
+                store, fixture.match_id, fixture.home_team_id, fixture.away_team_id,
+                as_of, home_expected_goals=home_xg, away_expected_goals=away_xg, line=line)
+            if frame.empty:
+                continue
+
+            print(f"{fixture.home_team_id} vs {fixture.away_team_id}"
+                  f"  ({pd.Timestamp(fixture.kickoff_utc):%Y-%m-%d %H:%M})")
+            shown = frame.drop(columns=["match_id", "stat"], errors="ignore")
+            print(shown.head(args.top).to_string(index=False))
+            print()
+
+        print("Fair odds exclude margin and betting tax. Props are the softer market,")
+        print("but a thin sample_90s means the rate is mostly prior, not evidence.")
+    return 0
+
+
+def cmd_scout(args) -> int:
+    """Shot profile and spatial summary for a team."""
+    from bet.spatial.pitch import bin_heatmap, heatmap_to_frame, shot_profile
+
+    as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.utcnow()
+
+    with Store.open(args.db, read_only=True) as store:
+        shots = store.shots_as_of(as_of)
+        if shots.empty:
+            print("no shot data - run: bet ingest --source understat --shots")
+            return 1
+
+        team_shots = shots[shots["team_id"] == args.team]
+        if team_shots.empty:
+            print(f"no shots recorded for {args.team}")
+            return 1
+
+        print(f"shot profile - {args.team} (as of {as_of:%Y-%m-%d})\n")
+        for key, value in shot_profile(team_shots).items():
+            print(f"  {key:22s} {value:.3f}" if isinstance(value, float)
+                  else f"  {key:22s} {value}")
+
+        print("\nshot density by pitch zone (share of shots)")
+        frame = heatmap_to_frame(bin_heatmap(team_shots))
+        by_zone = frame.groupby("zone")["share"].sum().sort_values(ascending=False)
+        print(by_zone.to_string(float_format=lambda v: f"{v:.3f}"))
+
+        print("\nxg_per_shot is the number to read first: two sides with equal")
+        print("season xG are not equally good if one gets there by volume.")
+    return 0
+
+
 def _print_leakage(store) -> None:
     report = store.leakage_report()
     total = int(report["violations"].sum())
@@ -235,12 +323,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ingest = sub.add_parser("ingest", help="fetch and load public data")
     p_ingest.add_argument("--source", default="all",
-                          choices=["all", "football_data", "clubelo", "understat", "openligadb"])
+                          choices=["all", "football_data", "clubelo", "understat",
+                                   "openligadb", "fbref"])
     p_ingest.add_argument("--seasons", default="2015-2026", help="e.g. 2015-2026 or 2019,2021")
     p_ingest.add_argument("--league", default="bundesliga")
     p_ingest.add_argument("--shots", action="store_true",
                           help="also fetch per-match shots from Understat (slow: ~306 requests/season)")
     p_ingest.add_argument("--elo-step", type=int, default=7, help="days between ClubElo snapshots")
+    p_ingest.add_argument("--max-matches", type=int, default=None,
+                          help="cap match pages fetched per season (fbref)")
     p_ingest.set_defaults(func=cmd_ingest)
 
     p_back = sub.add_parser("backtest", help="walk models forward and score them")
@@ -269,6 +360,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_predict.add_argument("--xi", type=float, default=0.0018)
     p_predict.add_argument("--target", default="goals", choices=["goals", "xg", "blend"])
     p_predict.set_defaults(func=cmd_predict)
+
+    p_props = sub.add_parser("props", help="price player props for a fixture")
+    p_props.add_argument("--stat", default="shots")
+    p_props.add_argument("--line", type=float, default=None)
+    p_props.add_argument("--as-of", dest="as_of", default=None)
+    p_props.add_argument("--days", type=int, default=10)
+    p_props.add_argument("--top", type=int, default=12, help="players shown per fixture")
+    p_props.add_argument("--league", default="bundesliga")
+    p_props.add_argument("--xi", type=float, default=0.0018)
+    p_props.set_defaults(func=cmd_props)
+
+    p_scout = sub.add_parser("scout", help="shot profile and spatial summary")
+    p_scout.add_argument("--team", required=True)
+    p_scout.add_argument("--as-of", dest="as_of", default=None)
+    p_scout.set_defaults(func=cmd_scout)
 
     p_status = sub.add_parser("status", help="row counts and integrity check")
     p_status.set_defaults(func=cmd_status)
