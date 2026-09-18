@@ -15,9 +15,9 @@ from bet.ingest.base import make_match_id, season_code, season_label
 from bet.ingest.football_data import FootballDataSource, _parse_kickoff
 from bet.ingest.understat import extract_json_var
 
-CSV_SAMPLE = """Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HTHG,HTAG,HTR,PSH,PSD,PSA,PSCH,PSCD,PSCA,AvgCH,AvgCD,AvgCA
-D1,24/08/2024,14:30,Bayern Munich,Wolfsburg,3,2,H,1,1,D,1.25,6.50,11.0,1.22,6.80,12.0,1.24,6.60,11.5
-D1,24/08/2024,14:30,Dortmund,M'gladbach,1,1,D,0,1,A,1.80,3.90,4.20,1.85,3.85,4.10,1.83,3.88,4.15
+CSV_SAMPLE = """Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HTHG,HTAG,HTR,HS,AS,HST,AST,HF,AF,HC,AC,HY,AY,HR,AR,PSH,PSD,PSA,PSCH,PSCD,PSCA,AvgCH,AvgCD,AvgCA
+D1,24/08/2024,14:30,Bayern Munich,Wolfsburg,3,2,H,1,1,D,18,7,9,3,11,14,8,2,1,3,0,0,1.25,6.50,11.0,1.22,6.80,12.0,1.24,6.60,11.5
+D1,24/08/2024,14:30,Dortmund,M'gladbach,1,1,D,0,1,A,12,11,4,5,13,12,5,6,2,1,0,0,1.80,3.90,4.20,1.85,3.85,4.10,1.83,3.88,4.15
 """
 
 
@@ -44,7 +44,8 @@ def test_football_data_parsing_loads_matches_results_and_odds(store, tmp_path):
     frame = pd.read_csv(path)
     from bet.ingest.base import IngestResult
     result = IngestResult(source="football_data")
-    matches, results, quotes = source._parse_season(frame, "bundesliga", "2024-25", result)
+    matches, results, quotes, team_stats = source._parse_season(
+        frame, "bundesliga", "2024-25", result)
 
     assert len(matches) == 2
     assert len(results) == 2
@@ -62,6 +63,16 @@ def test_football_data_parsing_loads_matches_results_and_odds(store, tmp_path):
     assert len(quotes) > 0
     assert {q["selection"] for q in quotes} == {"H", "D", "A"}
 
+    # Shots, corners, cards and fouls ship in the same CSV and were previously
+    # discarded. Corners and cards are among the softest markets available free.
+    assert len(team_stats) == 4
+    bayern = next(s for s in team_stats if s["team_id"] == "bayern_munich")
+    assert bayern["shots"] == 18
+    assert bayern["shots_on_target"] == 9
+    assert bayern["corners"] == 8
+    assert bayern["yellow_cards"] == 1
+    assert bayern["at_home"] is True
+
 
 def test_football_data_marks_closing_odds_as_unknowable_before_kickoff(store, tmp_path):
     """The specific leak that makes bad models look profitable."""
@@ -69,7 +80,7 @@ def test_football_data_marks_closing_odds_as_unknowable_before_kickoff(store, tm
     path.write_text(CSV_SAMPLE)
     source = FootballDataSource(store, raw_dir=tmp_path, delay=0)
     from bet.ingest.base import IngestResult
-    matches, _, quotes = source._parse_season(
+    matches, _, quotes, _ = source._parse_season(
         pd.read_csv(path), "bundesliga", "2024-25", IngestResult(source="fd"))
 
     kickoff = matches[0]["kickoff_utc"]
@@ -88,20 +99,20 @@ def test_football_data_marks_results_as_knowable_only_after_the_match(store, tmp
     path.write_text(CSV_SAMPLE)
     source = FootballDataSource(store, raw_dir=tmp_path, delay=0)
     from bet.ingest.base import IngestResult
-    matches, results, _ = source._parse_season(
+    matches, results, _, _ = source._parse_season(
         pd.read_csv(path), "bundesliga", "2024-25", IngestResult(source="fd"))
     for match, result in zip(matches, results):
         assert result["known_at"] > match["kickoff_utc"]
 
 
 def test_unknown_club_is_recorded_as_an_error_not_silently_dropped(store, tmp_path):
-    bad = CSV_SAMPLE + "D1,25/08/2024,14:30,Real Madrid,Bayern Munich,0,1,A,0,0,D,3.0,3.5,2.4,3.0,3.5,2.4,3.0,3.5,2.4\n"
+    bad = CSV_SAMPLE + "D1,25/08/2024,14:30,Real Madrid,Bayern Munich,0,1,A,0,0,D,9,14,3,6,10,11,4,7,1,2,0,0,3.0,3.5,2.4,3.0,3.5,2.4,3.0,3.5,2.4\n"
     path = tmp_path / "bad.csv"
     path.write_text(bad)
     source = FootballDataSource(store, raw_dir=tmp_path, delay=0)
     from bet.ingest.base import IngestResult
     result = IngestResult(source="fd")
-    matches, _, _ = source._parse_season(pd.read_csv(path), "bundesliga", "2024-25", result)
+    matches, _, _, _ = source._parse_season(pd.read_csv(path), "bundesliga", "2024-25", result)
     assert len(matches) == 2
     assert any("Real Madrid" in e for e in result.errors)
 

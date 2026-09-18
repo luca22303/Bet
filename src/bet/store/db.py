@@ -13,6 +13,11 @@ import pandas as pd
 from bet.config import SETTINGS
 from bet.store.schema import DDL, PIT_TABLES
 
+# Which source to believe when several report the same match. football-data.co.uk
+# is first because it is the longest-established and carries the odds the rest of
+# the pipeline is scored against, so results and prices stay consistent.
+RESULT_SOURCE_PREFERENCE = ("football_data", "openligadb", "understat", "fbref")
+
 
 @contextmanager
 def connect(db_path: Path | str | None = None, *, read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -98,11 +103,34 @@ class Store:
                    m.home_team_id, m.away_team_id,
                    r.home_goals, r.away_goals, r.outcome
             FROM match m
-            {join} match_result r ON r.match_id = m.match_id
+            {join} ({self._preferred_results_sql()}) r ON r.match_id = m.match_id
             WHERE {' AND '.join(where)}
             ORDER BY m.kickoff_utc
         """
         return self.con.execute(sql, params).df()
+
+    @staticmethod
+    def _preferred_results_sql() -> str:
+        """One result row per match, choosing between sources deterministically.
+
+        Several sources may report the same match. Rather than letting whichever
+        ingest ran last win, a fixed preference decides, so a backtest is
+        reproducible regardless of the order the ingests happened to run in.
+        """
+        cases = "\n                    ".join(
+            f"WHEN source = '{name}' THEN {i}"
+            for i, name in enumerate(RESULT_SOURCE_PREFERENCE))
+        return f"""
+            SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY match_id
+                    ORDER BY CASE
+                    {cases}
+                    ELSE 99 END
+                ) AS source_rank
+                FROM match_result
+            ) WHERE source_rank = 1
+        """
 
     def fixtures_between(self, start: datetime, end: datetime, *, league: str | None = None) -> pd.DataFrame:
         """Matches kicking off in a window, with results attached for scoring."""
@@ -116,7 +144,7 @@ class Store:
                    m.home_team_id, m.away_team_id,
                    r.home_goals, r.away_goals, r.outcome
             FROM match m
-            LEFT JOIN match_result r ON r.match_id = m.match_id
+            LEFT JOIN ({self._preferred_results_sql()}) r ON r.match_id = m.match_id
             WHERE {' AND '.join(where)}
             ORDER BY m.kickoff_utc
         """

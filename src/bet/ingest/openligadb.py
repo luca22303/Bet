@@ -52,7 +52,8 @@ class OpenLigaDBSource(Source):
                 "match", pd.DataFrame(matches).drop_duplicates("match_id"), ["match_id"])
         if results:
             result.rows_written["match_result"] = self.store.upsert(
-                "match_result", pd.DataFrame(results).drop_duplicates("match_id"), ["match_id"])
+                "match_result", pd.DataFrame(results).drop_duplicates(["match_id", "source"]),
+                ["match_id", "source"])
         return result
 
     def _parse_season(self, payload: list, league: str, season: str,
@@ -83,7 +84,7 @@ class OpenLigaDBSource(Source):
 
             home_goals, away_goals = int(final["PointsTeam1"]), int(final["PointsTeam2"])
             results.append({
-                "match_id": match_id,
+                "match_id": match_id, "source": self.name,
                 "home_goals": home_goals, "away_goals": away_goals,
                 "outcome": "H" if home_goals > away_goals else ("D" if home_goals == away_goals else "A"),
                 "ht_home": int(half["PointsTeam1"]) if half else None,

@@ -2,7 +2,8 @@
 
 A Bundesliga analytics platform built on free public data: a point-in-time data
 spine, a walk-forward backtesting harness, a corrected Dixon-Coles match engine,
-a player prop model, and spatial shot analysis.
+a player prop model, spatial shot analysis, LLM-extracted team news, and a
+matchday brief that pulls it together.
 
 The harness came first on purpose. Every layer above it is worthless without a
 way to tell whether it works.
@@ -76,6 +77,9 @@ bet tune --from 2018-08-01                # choose the decay rate empirically
 bet predict --days 10                     # price the next fixtures
 bet props --stat shots --days 7           # player prop prices
 bet scout --team bayern_munich            # shot profile and spatial summary
+bet news --file news.txt --team bayern_munich   # extract availability (local LLM)
+bet brief --days 8                        # the matchday recommendations
+bet quality                               # reconciliation and coverage checks
 ```
 
 Ingest `football_data` first — it carries results *and* historical closing odds
@@ -95,6 +99,11 @@ All free, no API keys.
 | FBref | per-match player lines (shots, xG, tackles, cards, minutes) | match pages, not season totals — see below |
 | kicker.de | predicted and confirmed XIs | forward-looking only; historical XIs come free from FBref |
 
+football-data.co.uk also carries **shots, shots on target, corners, fouls and
+cards** per match, in the same CSVs already downloaded for results and odds.
+Corners and cards are priced far more loosely than 1X2, so these arrive at no
+extra request and land in `team_match_stat`.
+
 Scraped sources are rate-limited to one request every three seconds and every
 payload is archived to `data/raw/` before parsing, so a site changing its markup
 costs a re-parse rather than a re-scrape.
@@ -109,6 +118,10 @@ src/bet/
   ingest/            source adapters (archive first, then parse)
   odds/devig.py      multiplicative / additive / power / Shin
   players.py         canonical player ids; name matching across sources
+  availability.py    absence impact, estimated from squad data
+  quality.py         reconciliation, coverage, staleness
+  recommend.py       the matchday brief
+  extract/           LLM extraction: Ollama (default) and Claude backends
   models/            Model contract, baselines, Dixon-Coles, promoted prior, props
   spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
   evaluation/        RPS, log loss, Brier, calibration, walk-forward, CLV
@@ -221,6 +234,102 @@ are not equally good if one gets there by volume. `xg_per_shot`,
 `share_in_box` and `mean_distance_m` tell them apart, and no aggregate xG total
 will.
 
+## Player availability
+
+Knowing a player is injured is easy. Knowing what it is *worth* is where most
+injury-adjusted models quietly fall apart: someone picks a number ("drop attack
+15% if the striker is out"), it is never checked against anything, and it
+decalibrates every probability the model produces.
+
+Nothing here is hand-tuned. An absence is costed from data already in the store:
+what the player contributes per 90, what his *actual replacement* contributes
+(the best available squad member in that position, not a league-average
+abstraction), and the difference as a share of the team's output. That converts
+directly into a shift in the Dixon-Coles attack parameter, since rates are
+exponential — a 6% loss of attacking output becomes `attack + log(0.94)`.
+
+Three properties the tests enforce, each of which caught a real bug during
+development:
+
+- **Impact tracks contribution.** Losing the first-choice striker costs ~25% of
+  attack; losing a squad midfielder costs ~8%.
+- **A fringe player's absence barely moves anything.** The XI is unchanged, so
+  the forecast should be too. Without weighting by playing time, ruling out a
+  reserve shifted the model as if a starter had gone.
+- **No absence can improve a team.** With one keeper in the squad there is no
+  same-position cover, so the fallback replacement is an outfielder with a far
+  higher attacking contribution — which made ruling out the first-choice keeper
+  *raise* expected goals until the delta was floored at zero.
+
+Honest caveat: the market prices known injuries faster than any scraper. The
+realistic value is not beating the market to team news; it is stopping your own
+model pricing a fixture around a striker who is on the bench.
+
+## Team news extraction (local LLM)
+
+`bet news` reads an article and writes validated rows to `player_availability`.
+Three passes:
+
+1. **Extract** — schema-constrained generation turns prose into entries, each
+   carrying the sentence it relied on.
+2. **Judge** — a second call, given the real squad list, decides whether each
+   entry is genuinely supported. The extractor's incentives are wrong: asked to
+   find team news, a model will find team news even in an article containing
+   none.
+3. **Resolve** — accepted names are matched against the actual squad. An
+   unresolvable name is dropped, never guessed.
+
+Everything rejected is kept, so a quiet week is distinguishable from a broken
+extractor.
+
+**Ollama is the default** (`qwen2.5:7b-instruct`). Extraction is high-volume and
+low-difficulty, which is exactly where a small local model wins: zero marginal
+cost, nothing leaves the machine, no rate limit. What makes it reliable is
+Ollama's `format` parameter, which constrains generation to a JSON schema at
+decode time — without it a 7B model returns markdown fences often enough to be
+unusable. Qwen is the default because German-language team news is a meaningful
+share of the sources and it handles non-English input better than similarly
+sized Llama variants.
+
+```bash
+ollama serve && ollama pull qwen2.5:7b-instruct
+```
+
+`ClaudeBackend` implements the same interface for the occasional document worth
+paying for. The judge pass matters *more* with a small model, not less.
+
+## The matchday brief
+
+`bet brief` is the layer everything else feeds. Match probabilities with
+absence adjustments, fair odds, value bets where market prices exist, prop
+prices, and the absences behind each adjustment — with every EV net of margin
+and betting tax.
+
+Two design commitments. A brief states its own uncertainty: thin prop samples
+are suppressed, and a model probability more than 10 points above the market is
+flagged as *probable model error, not value*. And `--narrate` is cosmetic only —
+the local model is handed finished numbers and asked to read them out. It never
+computes anything or decides what is recommended.
+
+## Data quality
+
+`bet quality` after every ingest. Scrapers do not fail loudly: a site changes
+its markup and the parser returns empty tables, a column is renamed and a stat
+silently becomes null — and the model keeps running, quietly getting worse.
+
+The strongest check is redundancy. `match_result` is keyed on
+**(match_id, source)**, so football-data.co.uk and OpenLigaDB results coexist
+and can be compared — two scrapes either agree or one is wrong. Keyed on
+`match_id` alone, the second ingest silently overwrote the first and the
+disagreement was invisible; that was a real bug, found by a test. Reads pick a
+source by fixed preference so backtests stay reproducible regardless of ingest
+order.
+
+Also checked: impossible odds, book sums below 1.0 (an "arbitrage" is far more
+likely a parser bug than a real price), per-season coverage gaps, staleness, and
+teams with too few appearances to be real — the signature of a name-resolution
+failure splitting one club in two.
+
 ## Three things worth knowing
 
 **Devigging method changes the answer.** On a heavy favourite, multiplicative
@@ -241,9 +350,10 @@ Closing line value converges in weeks instead of years.
 
 ## Not yet built
 
-- LLM injury/news extraction with schema validation (the `player_availability`
-  table is in place and waiting for it)
+- **Dashboard** — nothing visual exists yet; the spatial and brief layers
+  produce the data it would render
 - Live odds ingestion and +EV alerting
+- A news *fetcher* — `bet news` reads a file you supply; nothing crawls sources
 - Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
@@ -253,6 +363,6 @@ Closing line value converges in weeks instead of years.
 make test
 ```
 
-199 tests, no network required. Synthetic seasons are generated from known team
+256 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.

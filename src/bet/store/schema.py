@@ -38,14 +38,23 @@ CREATE TABLE IF NOT EXISTS match (
 );
 
 -- Results, knowable only after the final whistle.
+--
+-- Keyed on (match_id, source), not match_id alone, so two independent scrapes
+-- of the same match coexist instead of one overwriting the other. That
+-- redundancy is the only strong data-quality check available here: two sources
+-- either agree on a scoreline or one of them is wrong, and a schema that
+-- silently resolves the conflict by last-write-wins can never tell you which.
+-- Reads pick a source by preference; `bet quality` compares them.
 CREATE TABLE IF NOT EXISTS match_result (
-    match_id     VARCHAR PRIMARY KEY,
+    match_id     VARCHAR NOT NULL,
+    source       VARCHAR NOT NULL DEFAULT 'unknown',
     home_goals   INTEGER NOT NULL,
     away_goals   INTEGER NOT NULL,
     outcome      VARCHAR NOT NULL,   -- H / D / A
     ht_home      INTEGER,
     ht_away      INTEGER,
-    known_at     TIMESTAMP NOT NULL
+    known_at     TIMESTAMP NOT NULL,
+    PRIMARY KEY (match_id, source)
 );
 
 -- One row per book per selection per observation. `is_closing` marks the last
@@ -99,6 +108,27 @@ CREATE TABLE IF NOT EXISTS prediction (
     p_away     DOUBLE NOT NULL,
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (match_id, model, as_of)
+);
+
+-- Team-level match stats: shots, corners, cards, fouls.
+--
+-- These ship inside the football-data.co.uk CSVs already being downloaded for
+-- results and odds, at no extra request. Corners and cards in particular are
+-- priced far more loosely than 1X2, so discarding them was throwing away the
+-- softest markets available for free.
+CREATE TABLE IF NOT EXISTS team_match_stat (
+    match_id        VARCHAR NOT NULL,
+    team_id         VARCHAR NOT NULL,
+    source          VARCHAR NOT NULL,
+    at_home         BOOLEAN NOT NULL,
+    shots           INTEGER,
+    shots_on_target INTEGER,
+    corners         INTEGER,
+    fouls           INTEGER,
+    yellow_cards    INTEGER,
+    red_cards       INTEGER,
+    known_at        TIMESTAMP NOT NULL,
+    PRIMARY KEY (match_id, team_id, source)
 );
 
 -- Player registry. Squads turn over constantly, so a name appearing for the
@@ -181,6 +211,7 @@ CREATE TABLE IF NOT EXISTS player_availability (
     PRIMARY KEY (player_id, source, known_at)
 );
 
+CREATE INDEX IF NOT EXISTS idx_tms_match ON team_match_stat (match_id);
 CREATE INDEX IF NOT EXISTS idx_pms_match ON player_match_stat (match_id);
 CREATE INDEX IF NOT EXISTS idx_pms_player ON player_match_stat (player_id, known_at);
 CREATE INDEX IF NOT EXISTS idx_lineup_match ON lineup (match_id);
@@ -194,4 +225,5 @@ CREATE INDEX IF NOT EXISTS idx_rating_team ON team_rating (team_id, valid_from);
 
 # Tables that carry point-in-time facts, checked by the leakage guard.
 PIT_TABLES = ("match", "match_result", "odds_quote", "team_rating", "shot",
-              "player", "player_match_stat", "lineup", "player_availability")
+              "player", "player_match_stat", "lineup", "player_availability",
+              "team_match_stat")

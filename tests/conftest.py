@@ -56,7 +56,8 @@ def generate_season(start: datetime, season: str, rng: np.random.Generator,
                 "known_at": kickoff - timedelta(days=30),
             })
             results.append({
-                "match_id": match_id, "home_goals": home_goals, "away_goals": away_goals,
+                "match_id": match_id, "source": "synthetic",
+                "home_goals": home_goals, "away_goals": away_goals,
                 "outcome": outcome, "ht_home": None, "ht_away": None,
                 "known_at": kickoff + timedelta(seconds=SETTINGS.result_known_after_seconds),
             })
@@ -99,7 +100,7 @@ def populated_store(store):
         season = f"{2019 + offset}-{str(2020 + offset)[-2:]}"
         matches, results, quotes = generate_season(season_start, season, rng)
         store.upsert("match", matches, ["match_id"])
-        store.upsert("match_result", results, ["match_id"])
+        store.upsert("match_result", results, ["match_id", "source"])
         store.upsert("odds_quote", quotes,
                      ["match_id", "book", "market", "selection", "quoted_at"])
     return store
@@ -150,22 +151,29 @@ def store_with_shots(store):
         season = f"{2021 + offset}-{str(2022 + offset)[-2:]}"
         matches, results, quotes = generate_season(season_start, season, rng)
         store.upsert("match", matches, ["match_id"])
-        store.upsert("match_result", results, ["match_id"])
+        store.upsert("match_result", results, ["match_id", "source"])
         store.upsert("odds_quote", quotes,
                      ["match_id", "book", "market", "selection", "quoted_at"])
         store.upsert("shot", generate_shots(matches, results, rng), ["shot_id"])
     return store
 
 
-# Squad archetypes: (suffix, position, shots per 90, start probability).
+# Squad archetypes: (suffix, position, shots per 90, expected assists per 90,
+# start probability). Creative output is a separate rate rather than noise, so a
+# playmaker and a poacher are distinguishable -- with a flat random xa the whole
+# squad ends up with near-identical attacking contributions and nothing that
+# depends on player quality can be tested.
 SQUAD_TEMPLATE = [
-    ("gk", "GK", 0.05, 1.00),
-    ("cb1", "DF", 0.35, 0.95), ("cb2", "DF", 0.30, 0.90),
-    ("lb", "DF", 0.45, 0.85), ("rb", "DF", 0.50, 0.85),
-    ("dm", "MF", 0.70, 0.90), ("cm1", "MF", 1.10, 0.80), ("cm2", "MF", 1.30, 0.70),
-    ("am", "MF,FW", 2.10, 0.75), ("lw", "FW", 2.40, 0.70), ("rw", "FW", 2.30, 0.65),
-    ("st", "FW", 3.40, 0.85),
-    ("sub1", "MF", 1.20, 0.15), ("sub2", "FW", 2.00, 0.12), ("sub3", "DF", 0.30, 0.10),
+    ("gk", "GK", 0.05, 0.01, 1.00),
+    ("cb1", "DF", 0.35, 0.04, 0.95), ("cb2", "DF", 0.30, 0.03, 0.90),
+    ("lb", "DF", 0.45, 0.12, 0.85), ("rb", "DF", 0.50, 0.14, 0.85),
+    ("dm", "MF", 0.70, 0.08, 0.90), ("cm1", "MF", 1.10, 0.18, 0.80),
+    ("cm2", "MF", 1.30, 0.22, 0.70),
+    ("am", "MF,FW", 2.10, 0.42, 0.75), ("lw", "FW", 2.40, 0.30, 0.70),
+    ("rw", "FW", 2.30, 0.28, 0.65),
+    ("st", "FW", 3.40, 0.18, 0.85),
+    ("sub1", "MF", 1.20, 0.15, 0.15), ("sub2", "FW", 2.00, 0.16, 0.12),
+    ("sub3", "DF", 0.30, 0.03, 0.10),
 ]
 
 
@@ -184,7 +192,7 @@ def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
             known_at = row.kickoff_utc + timedelta(
                 seconds=SETTINGS.result_known_after_seconds)
 
-            for suffix, position, shot_rate, start_prob in SQUAD_TEMPLATE:
+            for suffix, position, shot_rate, assist_rate, start_prob in SQUAD_TEMPLATE:
                 player_id = f"{team_id}_{suffix}"
                 full_name = f"{suffix.upper()} {team_id.replace('_', ' ').title()}"
                 if player_id not in seen:
@@ -204,17 +212,21 @@ def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
 
                 nineties = minutes / 90.0
                 shots = int(rng.poisson(shot_rate * nineties))
+                # xG per shot varies by role: a striker shoots from better
+                # positions than a centre-back lashing at a corner.
+                xg_per_shot = 0.13 if position.startswith("FW") else 0.07
                 stats.append({
                     "match_id": row.match_id, "player_id": player_id, "team_id": team_id,
                     "source": source, "position": position, "started": started,
                     "minutes": minutes,
                     "goals": float(rng.binomial(shots, 0.11)) if shots else 0.0,
-                    "assists": float(rng.binomial(1, 0.08)),
+                    "assists": float(rng.poisson(assist_rate * nineties * 0.8)),
                     "shots": float(shots),
                     "shots_on_target": float(rng.binomial(shots, 0.35)) if shots else 0.0,
-                    "xg": float(shots * rng.uniform(0.05, 0.14)),
-                    "npxg": float(shots * rng.uniform(0.04, 0.12)),
-                    "xa": float(rng.uniform(0.0, 0.25)),
+                    "xg": float(shots * xg_per_shot * rng.uniform(0.8, 1.2)),
+                    "npxg": float(shots * xg_per_shot * rng.uniform(0.7, 1.0)),
+                    "xa": float(rng.gamma(2.0, assist_rate * nineties / 2.0))
+                    if assist_rate > 0 else 0.0,
                     "passes_completed": float(rng.integers(10, 70)),
                     "passes_attempted": float(rng.integers(15, 85)),
                     "progressive_passes": float(rng.integers(0, 9)),
@@ -252,7 +264,7 @@ def store_with_players(store):
         season = f"{2021 + offset}-{str(2022 + offset)[-2:]}"
         matches, results, quotes = generate_season(season_start, season, rng)
         store.upsert("match", matches, ["match_id"])
-        store.upsert("match_result", results, ["match_id"])
+        store.upsert("match_result", results, ["match_id", "source"])
         store.upsert("odds_quote", quotes,
                      ["match_id", "book", "market", "selection", "quoted_at"])
 

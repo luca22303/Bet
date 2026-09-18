@@ -7,6 +7,9 @@
     bet predict                     probabilities and fair odds for upcoming fixtures
     bet props --stat shots          player prop prices for a fixture
     bet scout --team bayern_munich  shot profile and spatial summary
+    bet news --team bayern_munich   extract availability from a news file (local LLM)
+    bet brief                       compile the matchday recommendations
+    bet quality                     data quality and cross-source reconciliation
     bet status                      row counts and the leakage check
     bet check                       point-in-time integrity only
 """
@@ -16,6 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -285,6 +289,89 @@ def cmd_scout(args) -> int:
     return 0
 
 
+def cmd_news(args) -> int:
+    """Extract player availability from a news file using a local LLM."""
+    from bet.extract import OllamaBackend, extract_and_verify, to_availability_rows
+
+    text = Path(args.file).read_text(encoding="utf-8", errors="replace")
+    published = datetime.fromisoformat(args.published) if args.published else datetime.utcnow()
+
+    backend = OllamaBackend(model=args.model, host=args.host)
+    healthy, message = backend.health()
+    if not healthy:
+        print(f"LLM backend unavailable: {message}")
+        print("\nStart Ollama and pull a model:")
+        print("  ollama serve")
+        print(f"  ollama pull {args.model}")
+        return 1
+    print(f"backend: {message}")
+
+    with Store.open(args.db) as store:
+        store.init_schema()
+        squad = store.squad_as_of(published, args.team)
+        if not squad:
+            print(f"no squad on record for {args.team} - run: bet ingest --source fbref")
+            return 1
+
+        result = extract_and_verify(
+            backend, text, args.team, published, list(squad.values()),
+            min_confidence=args.min_confidence, judge=not args.no_judge)
+
+        print(f"\n{result.summary()}")
+        for entry in result.accepted:
+            print(f"  ACCEPT {entry.player_name:<24} {entry.status.value:<10} "
+                  f"conf={entry.source_confidence:.2f}  {entry.reason or ''}")
+        for rejection in result.rejected:
+            name = rejection["entry"].get("player_name", "?")
+            print(f"  reject {name:<24} {rejection['reason']}")
+
+        rows = to_availability_rows(result, store, args.team, published)
+        if rows.empty:
+            print("\nnothing written")
+            return 0
+
+        written = store.upsert("player_availability", rows,
+                               ["player_id", "source", "known_at"])
+        print(f"\n{written} availability rows written")
+    return 0
+
+
+def cmd_brief(args) -> int:
+    """Compile the matchday brief."""
+    from bet.recommend import build_brief, narrate
+
+    as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.utcnow()
+
+    with Store.open(args.db, read_only=True) as store:
+        brief = build_brief(store, as_of, days=args.days, league=args.league,
+                            xi=args.xi, use_availability=not args.no_availability,
+                            prop_stat=args.prop_stat, min_edge=args.min_edge)
+        print(brief.to_text())
+
+        if args.narrate:
+            from bet.extract import OllamaBackend
+            backend = OllamaBackend(model=args.model, host=args.host)
+            healthy, message = backend.health()
+            if not healthy:
+                print(f"\n(narration skipped: {message})")
+            else:
+                print("\n" + "=" * 72)
+                print("SUMMARY")
+                print("=" * 72)
+                print(narrate(brief, backend))
+    return 0
+
+
+def cmd_quality(args) -> int:
+    """Data quality checks and cross-source reconciliation."""
+    from bet.quality import run_quality_checks
+
+    with Store.open(args.db, read_only=True) as store:
+        report = run_quality_checks(store, seasons_expected=args.seasons_expected)
+        print(report.to_text())
+        return 0 if report.passed else 1
+
+
 def _print_leakage(store) -> None:
     report = store.leakage_report()
     total = int(report["violations"].sum())
@@ -375,6 +462,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_scout.add_argument("--team", required=True)
     p_scout.add_argument("--as-of", dest="as_of", default=None)
     p_scout.set_defaults(func=cmd_scout)
+
+    p_news = sub.add_parser("news", help="extract availability from a news file")
+    p_news.add_argument("--file", required=True, help="path to a text file of team news")
+    p_news.add_argument("--team", required=True, help="canonical team id")
+    p_news.add_argument("--published", default=None, help="publication timestamp (ISO)")
+    p_news.add_argument("--model", default="qwen2.5:7b-instruct")
+    p_news.add_argument("--host", default="http://localhost:11434")
+    p_news.add_argument("--min-confidence", type=float, default=0.5)
+    p_news.add_argument("--no-judge", action="store_true",
+                        help="skip verification (faster, less reliable)")
+    p_news.set_defaults(func=cmd_news)
+
+    p_brief = sub.add_parser("brief", help="compile the matchday recommendations")
+    p_brief.add_argument("--as-of", dest="as_of", default=None)
+    p_brief.add_argument("--days", type=int, default=8)
+    p_brief.add_argument("--league", default="bundesliga")
+    p_brief.add_argument("--xi", type=float, default=0.0018)
+    p_brief.add_argument("--prop-stat", default="shots")
+    p_brief.add_argument("--min-edge", type=float, default=0.02)
+    p_brief.add_argument("--no-availability", action="store_true")
+    p_brief.add_argument("--narrate", action="store_true",
+                         help="add a written summary via the local LLM")
+    p_brief.add_argument("--model", default="qwen2.5:7b-instruct")
+    p_brief.add_argument("--host", default="http://localhost:11434")
+    p_brief.set_defaults(func=cmd_brief)
+
+    p_quality = sub.add_parser("quality", help="data quality and reconciliation")
+    p_quality.add_argument("--seasons-expected", type=int, default=None)
+    p_quality.set_defaults(func=cmd_quality)
 
     p_status = sub.add_parser("status", help="row counts and integrity check")
     p_status.set_defaults(func=cmd_status)

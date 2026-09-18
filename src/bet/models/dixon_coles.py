@@ -382,7 +382,8 @@ class DixonColesModel(Model):
 
     def __init__(self, xi: float = 0.0018, target: str = "goals",
                  blend_weight: float = 0.5, use_promoted_prior: bool = True,
-                 min_training_matches: int = 100, name: str | None = None) -> None:
+                 use_availability: bool = False, min_training_matches: int = 100,
+                 name: str | None = None) -> None:
         if target not in {"goals", "xg", "blend"}:
             raise ValueError(f"target must be goals, xg or blend, got {target!r}")
         if not 0.0 <= blend_weight <= 1.0:
@@ -392,12 +393,15 @@ class DixonColesModel(Model):
         self.target = target
         self.blend_weight = blend_weight
         self.use_promoted_prior = use_promoted_prior
+        self.use_availability = use_availability
         self.min_training_matches = min_training_matches
         self.name = name or f"dixon_coles_{target}"
 
         self.params: DixonColesParams | None = None
         self.xg_params: DixonColesParams | None = None
         self.prior = None
+        self.player_rates: pd.DataFrame = pd.DataFrame()
+        self.absence_impacts: dict[str, object] = {}
         self._fallback = np.array([0.45, 0.25, 0.30])
 
     # ------------------------------------------------------------------ fit
@@ -421,6 +425,11 @@ class DixonColesModel(Model):
             )
         else:
             self.xg_params = None
+
+        if self.use_availability:
+            # Per-90 rates as they stood at as_of, so the absence adjustment is
+            # point-in-time correct like everything else.
+            self.player_rates = store.player_rates_as_of(as_of, min_minutes=0.0)
 
         if self.use_promoted_prior:
             ratings = store.ratings_as_of(as_of)
@@ -460,8 +469,40 @@ class DixonColesModel(Model):
         out = np.zeros((len(fixtures), 3))
         for i, row in enumerate(fixtures.itertuples(index=False)):
             lam, mu = self._rates(row.home_team_id, row.away_team_id)
+            if self.use_availability:
+                lam, mu = self._apply_availability(
+                    store, as_of, row.home_team_id, row.away_team_id, lam, mu)
             out[i] = match_probabilities(lam, mu, self.params.rho)
         return self._validate(out, len(fixtures))
+
+    def _absence_impact(self, store, as_of: datetime, team_id: str):
+        """Cached per-team absence impact for this as_of."""
+        from bet.availability import absences_from_store, estimate_absence_impact
+
+        key = f"{team_id}:{as_of.isoformat()}"
+        if key not in self.absence_impacts:
+            absences = absences_from_store(store, as_of, team_id)
+            self.absence_impacts[key] = estimate_absence_impact(
+                self.player_rates, team_id, absences)
+        return self.absence_impacts[key]
+
+    def _apply_availability(self, store, as_of: datetime, home: str, away: str,
+                            lam: float, mu: float) -> tuple[float, float]:
+        """Shift both rates for who is missing on each side.
+
+        Rates are exponential in the parameters, so an absence is an additive
+        shift on the log scale. A team losing attackers scores less; a team
+        losing defenders concedes more, which raises the *opponent's* rate --
+        hence the opposite sign on the defence term.
+        """
+        home_impact = self._absence_impact(store, as_of, home)
+        away_impact = self._absence_impact(store, as_of, away)
+
+        log_lam = np.log(lam) + home_impact.attack_log_shift - away_impact.defence_log_shift
+        log_mu = np.log(mu) + away_impact.attack_log_shift - home_impact.defence_log_shift
+        # Clipped for the same reason the rates are clipped during fitting: a
+        # long injury list must not be able to produce an absurd scoreline.
+        return float(np.exp(np.clip(log_lam, -3.0, 2.5))), float(np.exp(np.clip(log_mu, -3.0, 2.5)))
 
     def _rates(self, home: str, away: str) -> tuple[float, float]:
         lam, mu = self.params.rates(home, away)

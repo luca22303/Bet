@@ -87,7 +87,7 @@ class FootballDataSource(Source):
         if code is None:
             raise ValueError(f"unknown league {league!r}; expected one of {list(FOOTBALL_DATA_LEAGUES)}")
 
-        matches, results, quotes = [], [], []
+        matches, results, quotes, team_stats = [], [], [], []
 
         for start_year in seasons:
             url = f"{BASE_URL}/{season_code(start_year)}/{code}.csv"
@@ -105,28 +105,35 @@ class FootballDataSource(Source):
                 continue
 
             season = season_label(start_year)
-            m, r, q = self._parse_season(frame, league, season, result)
+            m, r, q, s = self._parse_season(frame, league, season, result)
             matches.extend(m)
             results.extend(r)
             quotes.extend(q)
+            team_stats.extend(s)
 
         if matches:
             result.rows_written["match"] = self.store.upsert(
                 "match", pd.DataFrame(matches).drop_duplicates("match_id"), ["match_id"])
         if results:
             result.rows_written["match_result"] = self.store.upsert(
-                "match_result", pd.DataFrame(results).drop_duplicates("match_id"), ["match_id"])
+                "match_result", pd.DataFrame(results).drop_duplicates(["match_id", "source"]),
+                ["match_id", "source"])
         if quotes:
             quote_frame = pd.DataFrame(quotes).drop_duplicates(
                 ["match_id", "book", "market", "selection", "quoted_at"])
             result.rows_written["odds_quote"] = self.store.upsert(
                 "odds_quote", quote_frame, ["match_id", "book", "market", "selection", "quoted_at"])
+        if team_stats:
+            stat_frame = pd.DataFrame(team_stats).drop_duplicates(
+                ["match_id", "team_id", "source"])
+            result.rows_written["team_match_stat"] = self.store.upsert(
+                "team_match_stat", stat_frame, ["match_id", "team_id", "source"])
 
         return result
 
     def _parse_season(self, frame: pd.DataFrame, league: str, season: str,
-                      result: IngestResult) -> tuple[list, list, list]:
-        matches, results, quotes = [], [], []
+                      result: IngestResult) -> tuple[list, list, list, list]:
+        matches, results, quotes, team_stats = [], [], [], []
         time_column = "Time" if "Time" in frame.columns else None
 
         for row in frame.itertuples(index=False):
@@ -162,7 +169,7 @@ class FootballDataSource(Source):
 
             outcome = "H" if home_goals > away_goals else ("D" if home_goals == away_goals else "A")
             results.append({
-                "match_id": match_id,
+                "match_id": match_id, "source": self.name,
                 "home_goals": home_goals, "away_goals": away_goals, "outcome": outcome,
                 "ht_home": int(record["HTHG"]) if not pd.isna(record.get("HTHG")) else None,
                 "ht_away": int(record["HTAG"]) if not pd.isna(record.get("HTAG")) else None,
@@ -171,8 +178,50 @@ class FootballDataSource(Source):
             })
 
             quotes.extend(self._extract_odds(record, match_id, kickoff))
+            team_stats.extend(self._extract_team_stats(record, match_id, home, away, kickoff))
 
-        return matches, results, quotes
+        return matches, results, quotes, team_stats
+
+    def _extract_team_stats(self, record: dict, match_id: str, home: str, away: str,
+                            kickoff: datetime) -> list[dict]:
+        """Shots, corners, cards and fouls, already present in the same CSV.
+
+        Home and away columns share a suffix scheme: HS/AS for shots, HC/AC for
+        corners, and so on. Rows are only emitted when at least one value is
+        present, so older seasons that omit these columns produce nothing rather
+        than a table full of nulls.
+        """
+        fields = {
+            "shots": ("HS", "AS"),
+            "shots_on_target": ("HST", "AST"),
+            "corners": ("HC", "AC"),
+            "fouls": ("HF", "AF"),
+            "yellow_cards": ("HY", "AY"),
+            "red_cards": ("HR", "AR"),
+        }
+        known_at = kickoff + timedelta(seconds=SETTINGS.result_known_after_seconds)
+        rows = []
+
+        for team_id, at_home, index in ((home, True, 0), (away, False, 1)):
+            values = {}
+            for target, columns in fields.items():
+                raw = record.get(columns[index])
+                if raw is None or pd.isna(raw):
+                    values[target] = None
+                    continue
+                try:
+                    values[target] = int(float(raw))
+                except (TypeError, ValueError):
+                    values[target] = None
+
+            if all(v is None for v in values.values()):
+                continue
+
+            rows.append({
+                "match_id": match_id, "team_id": team_id, "source": self.name,
+                "at_home": at_home, "known_at": known_at, **values,
+            })
+        return rows
 
     def _extract_odds(self, record: dict, match_id: str, kickoff: datetime) -> list[dict]:
         """Pull 1X2 prices, tagging closing and pre-closing correctly.
