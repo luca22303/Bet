@@ -65,6 +65,9 @@ exists rather than a hardcoded constant.)
 pip install -e ".[dev]"
 ```
 
+**Starting it with live data: see [QUICKSTART.md](QUICKSTART.md)** — the full
+sequence from clone to dashboard, with what to expect at each step.
+
 ## Use
 
 ```bash
