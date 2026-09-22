@@ -61,25 +61,66 @@ class Store:
     def upsert(self, table: str, frame: pd.DataFrame, key_columns: list[str]) -> int:
         """Insert rows, replacing any that collide on `key_columns`.
 
-        Ingestion is re-run constantly during development; it has to be
-        idempotent or the store fills with duplicates that quietly double the
-        weight of whichever matches happened to be re-fetched.
+        Ingestion is re-run constantly; it has to be idempotent or the store
+        fills with duplicates that quietly double the weight of whichever
+        matches happened to be re-fetched.
+
+        This is one `INSERT ... ON CONFLICT` rather than a DELETE followed by
+        an INSERT. The pair was not atomic -- an INSERT that failed after the
+        DELETE committed left the rows simply gone -- and the bulk delete drove
+        the primary key's ART index directly, which is where a refresh died
+        with "Failed to delete all rows from index. Only deleted 0 out of 36
+        rows" and left the whole database invalidated. One statement has no
+        window in between and lets DuckDB maintain the index its own way.
+
+        Columns absent from `frame` keep their stored values, where deleting
+        and re-inserting reset them to NULL. That matters with several sources
+        writing one table: a partial scrape should not erase what another
+        source already established.
         """
         if frame.empty:
             return 0
 
+        missing = [key for key in key_columns if key not in frame.columns]
+        if missing:
+            raise ValueError(f"{table}: upsert key column(s) {missing} are not in the frame")
+
         if "known_at" in frame.columns and frame["known_at"].isna().any():
             raise ValueError(f"{table}: known_at must be set on every row")
+
+        # Two rows sharing a key in one batch make ON CONFLICT raise ("cannot
+        # update the same row twice"). Keeping the last is the freshest read of
+        # the same fact. Callers used to do this individually and not all of
+        # them did, so it belongs here.
+        if frame.duplicated(subset=key_columns).any():
+            frame = frame.drop_duplicates(subset=key_columns, keep="last")
 
         self.con.register("_incoming", frame)
         try:
             cols = ", ".join(f'"{c}"' for c in frame.columns)
-            predicate = " AND ".join(f't."{k}" = i."{k}"' for k in key_columns)
-            self.con.execute(
-                f"DELETE FROM {table} t WHERE EXISTS "
-                f"(SELECT 1 FROM _incoming i WHERE {predicate})"
+            conflict = ", ".join(f'"{k}"' for k in key_columns)
+            # ON CONFLICT needs the target to be the table's key, not a prefix
+            # of it. Upserting `match_result` on match_id alone would mean
+            # "replace every source's result for this match", which is the
+            # opposite of why that table is keyed by source.
+            updatable = [c for c in frame.columns if c not in key_columns]
+            action = (
+                "DO UPDATE SET " + ", ".join(f'"{c}" = excluded."{c}"' for c in updatable)
+                if updatable else "DO NOTHING"
             )
-            self.con.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM _incoming")
+            try:
+                self.con.execute(
+                    f"INSERT INTO {table} ({cols}) SELECT {cols} FROM _incoming "
+                    f"ON CONFLICT ({conflict}) {action}"
+                )
+            except duckdb.BinderException as exc:
+                if "conflict target" not in str(exc):
+                    raise
+                raise ValueError(
+                    f"{table}: upsert key {key_columns} is not a unique "
+                    f"constraint on the table — it must be the full primary "
+                    f"key, not part of one"
+                ) from exc
         finally:
             self.con.unregister("_incoming")
         return len(frame)

@@ -49,6 +49,28 @@ class ServerState:
     _con: object | None = None
     _con_lock: threading.Lock = field(default_factory=threading.Lock)
 
+    def reset_connection(self) -> None:
+        """Drop the shared connection so the next caller opens a fresh one.
+
+        A fatal DuckDB error invalidates the whole database *instance*, not
+        just the statement that hit it: every later query raises "database has
+        been invalidated because of a previous fatal error. The database must
+        be restarted prior to being used again." With one long-lived
+        connection that means every page load after the first failure returns
+        the same stack trace until someone restarts the process.
+
+        Reopening is exactly the restart DuckDB is asking for, and it costs a
+        file open. Whatever caused the fatal error still needs fixing -- this
+        only keeps one bad write from taking the server down with it.
+        """
+        with self._con_lock:
+            if self._con is not None:
+                try:
+                    self._con.close()
+                except Exception:
+                    pass            # already broken; closing is best-effort
+                self._con = None
+
     def cursor(self):
         """A handle on the database for one request or one refresh.
 
@@ -113,20 +135,38 @@ def _open_store(state: ServerState):
 
 def render_page(state: ServerState) -> str:
     """Build the dashboard from the current contents of the store."""
+    import duckdb
+
     from bet.dashboard import build
 
-    with _open_store(state) as store:
-        return build(store, datetime.utcnow(), days=state.days,
-                     league=state.league, served=True)
+    def _render() -> str:
+        with _open_store(state) as store:
+            return build(store, datetime.utcnow(), days=state.days,
+                         league=state.league, served=True)
+
+    try:
+        return _render()
+    except duckdb.FatalException:
+        # The database instance is poisoned, not the request. Reopen and try
+        # once more; a second failure is a real fault and belongs on the page.
+        state.reset_connection()
+        return _render()
 
 
 def run_refresh(state: ServerState) -> None:
     """Fetch from the sources. Runs on a worker thread."""
     from bet.live import refresh
 
+    import duckdb
+
     try:
-        with _open_store(state) as store:
-            report = refresh(store, league=state.league, sources=state.sources)
+        try:
+            with _open_store(state) as store:
+                report = refresh(store, league=state.league, sources=state.sources)
+        except duckdb.FatalException:
+            state.reset_connection()
+            with _open_store(state) as store:
+                report = refresh(store, league=state.league, sources=state.sources)
 
         # `refresh` collects per-source failures rather than raising, so a run
         # where every source was unreachable returns normally. Reporting that as
@@ -153,6 +193,8 @@ def run_refresh(state: ServerState) -> None:
 
 
 def status_payload(state: ServerState) -> dict:
+    import duckdb
+
     from bet.dashboard import data_provenance
 
     payload = {
@@ -163,8 +205,13 @@ def status_payload(state: ServerState) -> dict:
         "last_errors": state.last_errors,
     }
     try:
-        with _open_store(state) as store:
-            provenance = data_provenance(store, datetime.utcnow())
+        try:
+            with _open_store(state) as store:
+                provenance = data_provenance(store, datetime.utcnow())
+        except duckdb.FatalException:
+            state.reset_connection()
+            with _open_store(state) as store:
+                provenance = data_provenance(store, datetime.utcnow())
         payload["provenance"] = {
             "sources": provenance["sources"],
             "synthetic": provenance["synthetic"],

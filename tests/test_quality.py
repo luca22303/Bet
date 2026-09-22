@@ -149,9 +149,10 @@ def test_stale_data_is_flagged(populated_store):
 def test_fresh_data_is_not_flagged(store):
     now = datetime(2024, 6, 1)
     store.upsert("match_result", pd.DataFrame([{
-        "match_id": "m", "home_goals": 1, "away_goals": 0, "outcome": "H",
+        "match_id": "m", "source": "football_data",
+        "home_goals": 1, "away_goals": 0, "outcome": "H",
         "ht_home": None, "ht_away": None, "known_at": now - timedelta(days=1),
-    }]), ["match_id"])
+    }]), ["match_id", "source"])
     issues = check_staleness(store, as_of=now)
     assert not any(i.check == "staleness" and "match_result" in i.detail
                    and "days old" in i.detail for i in issues)

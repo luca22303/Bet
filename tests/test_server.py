@@ -319,3 +319,71 @@ def test_a_clean_refresh_clears_the_previous_errors(tmp_path, monkeypatch):
     assert state.last_errors == []
     assert state.last_error == ""
     state.close()
+
+
+def test_the_server_recovers_from_an_invalidated_database(running, monkeypatch):
+    """A fatal DuckDB error poisons the whole instance, not one statement.
+
+    Every later request raised "database has been invalidated because of a
+    previous fatal error", so one bad write meant a stack trace on every page
+    load until someone restarted the process.
+    """
+    import duckdb
+
+    import bet.dashboard as dashboard
+
+    base, state = running
+    assert _get(f"{base}/")[0] == 200            # healthy to begin with
+
+    real_build = dashboard.build
+    calls = {"n": 0}
+
+    def _fatal_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise duckdb.FatalException(
+                "FATAL Error: Failed: database has been invalidated")
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(dashboard, "build", _fatal_once)
+
+    status, body = _get(f"{base}/")
+    assert status == 200
+    assert "Could not build the dashboard" not in body
+    assert calls["n"] == 2, "the request should have retried on a fresh connection"
+
+
+def test_a_persistent_fatal_error_still_reaches_the_page(running, monkeypatch):
+    """Recovery must not turn a real fault into an empty page."""
+    import duckdb
+
+    import bet.dashboard as dashboard
+
+    base, _ = running
+    monkeypatch.setattr(dashboard, "build", lambda *a, **k: (_ for _ in ()).throw(
+        duckdb.FatalException("FATAL Error: still broken")))
+
+    status, body = _get(f"{base}/")
+    assert status == 200
+    assert "Could not build the dashboard" in body
+    assert "still broken" in body
+
+
+def test_reset_connection_hands_out_a_working_cursor_afterwards(tmp_path):
+    from bet.store import Store
+
+    db = tmp_path / "reset.duckdb"
+    with Store.open(db) as store:
+        store.init_schema()
+
+    state = ServerState(db_path=db)
+    first = state.cursor()
+    first.execute("SELECT 1").fetchall()
+    first.close()
+
+    state.reset_connection()
+
+    second = state.cursor()
+    assert second.execute("SELECT count(*) FROM match").fetchone() == (0,)
+    second.close()
+    state.close()

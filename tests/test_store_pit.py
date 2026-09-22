@@ -117,3 +117,120 @@ def test_odds_as_of_returns_the_latest_price_not_all_of_them(store):
 
     earlier = store.odds_as_of(kickoff - timedelta(days=2, hours=12))
     assert earlier["decimal_odds"].iloc[0] == pytest.approx(1.80)
+
+
+# ------------------------------------------------------------------ upsert
+
+def _match_rows(ids, **overrides):
+    import pandas as pd
+
+    base = {
+        "source": "football_data", "league": "bundesliga", "season": "2026-27",
+        "kickoff_utc": pd.Timestamp("2026-08-28 19:30:00"),
+        "home_team_id": "a", "away_team_id": "b",
+        "known_at": pd.Timestamp("2026-07-01"),
+    }
+    base.update(overrides)
+    return pd.DataFrame([dict(base, match_id=i) for i in ids])
+
+
+def test_upsert_replaces_rows_that_collide_on_the_key(store):
+    store.init_schema()
+    store.upsert("match", _match_rows(["m1", "m2"]), ["match_id"])
+    store.upsert("match", _match_rows(["m2", "m3"], home_team_id="z"), ["match_id"])
+
+    rows = store.con.execute(
+        "SELECT match_id, home_team_id FROM match ORDER BY match_id").fetchall()
+    assert rows == [("m1", "a"), ("m2", "z"), ("m3", "z")]
+
+
+def test_two_sources_writing_the_same_matches_does_not_break_the_index(store):
+    """The refresh that invalidated the database did exactly this.
+
+    football-data.co.uk writes the played fixtures, then OpenLigaDB writes the
+    whole season over the top. Driving the primary key's index with a bulk
+    DELETE for that overlap is what failed with "Failed to delete all rows
+    from index. Only deleted 0 out of 36 rows".
+    """
+    store.init_schema()
+    played = [f"bundesliga:2026-27:t{i}:t{i + 1}" for i in range(36)]
+    season = [f"bundesliga:2026-27:t{i}:t{i + 1}" for i in range(306)]
+
+    for _ in range(5):                       # several refreshes in one session
+        store.upsert("match", _match_rows(played, source="football_data"), ["match_id"])
+        store.upsert("match", _match_rows(season, source="openligadb"), ["match_id"])
+
+    assert store.con.execute("SELECT count(*) FROM match").fetchone()[0] == 306
+    assert store.con.execute(
+        "SELECT count(DISTINCT match_id) FROM match").fetchone()[0] == 306
+
+
+def test_upsert_keeps_columns_the_incoming_frame_omits(store):
+    """A partial scrape must not erase what another source established."""
+    store.init_schema()
+    store.upsert("match", _match_rows(["m1"], home_team_id="hertha"), ["match_id"])
+
+    import pandas as pd
+    partial = pd.DataFrame([{"match_id": "m1", "source": "openligadb",
+                             "known_at": pd.Timestamp("2026-07-02")}])
+    store.upsert("match", partial, ["match_id"])
+
+    row = store.con.execute(
+        "SELECT source, home_team_id FROM match WHERE match_id = 'm1'").fetchone()
+    assert row == ("openligadb", "hertha")
+
+
+def test_upsert_collapses_duplicate_keys_within_one_batch(store):
+    """Two rows for one key in a single batch would otherwise raise."""
+    store.init_schema()
+    frame = _match_rows(["m1", "m1"])
+    frame.loc[1, "home_team_id"] = "last-one-wins"
+    written = store.upsert("match", frame, ["match_id"])
+
+    assert written == 1
+    assert store.con.execute(
+        "SELECT home_team_id FROM match").fetchone() == ("last-one-wins",)
+
+
+def test_upsert_rejects_a_key_column_the_frame_does_not_have(store):
+    import pytest
+
+    store.init_schema()
+    with pytest.raises(ValueError, match="not in the frame"):
+        store.upsert("match", _match_rows(["m1"]), ["match_id", "nonexistent"])
+
+
+def test_a_failed_upsert_leaves_the_existing_rows_alone(store):
+    """DELETE-then-INSERT lost the rows outright when the INSERT failed."""
+    import pandas as pd
+    import pytest
+
+    store.init_schema()
+    store.upsert("match", _match_rows(["m1", "m2"]), ["match_id"])
+
+    broken = _match_rows(["m1", "m2"])
+    broken["kickoff_utc"] = "not a timestamp at all"
+    with pytest.raises(Exception):
+        store.upsert("match", broken, ["match_id"])
+
+    assert store.con.execute("SELECT count(*) FROM match").fetchone()[0] == 2
+
+
+def test_upserting_on_part_of_the_key_is_refused_with_a_clear_message(store):
+    """`match_result` is keyed by source so two scrapes can disagree.
+
+    Upserting it on match_id alone would mean "replace every source's result
+    for this match", quietly undoing that. DuckDB reports it as a binder
+    error about conflict targets, which says nothing about the actual mistake.
+    """
+    import pandas as pd
+    import pytest
+
+    store.init_schema()
+    frame = pd.DataFrame([{
+        "match_id": "m1", "source": "football_data", "home_goals": 2,
+        "away_goals": 1, "outcome": "H", "ht_home": None, "ht_away": None,
+        "known_at": pd.Timestamp("2026-08-28"),
+    }])
+    with pytest.raises(ValueError, match="not a unique constraint"):
+        store.upsert("match_result", frame, ["match_id"])

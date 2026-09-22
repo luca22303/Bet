@@ -65,7 +65,8 @@ def test_value_is_assessed_when_prices_are_knowable(store):
                         "season": "2023-24", "kickoff_utc": day,
                         "home_team_id": home, "away_team_id": away,
                         "known_at": day - timedelta(days=30)})
-        results.append({"match_id": match_id, "home_goals": 2, "away_goals": 1,
+        results.append({"match_id": match_id, "source": "t",
+                        "home_goals": 2, "away_goals": 1,
                         "outcome": "H", "ht_home": None, "ht_away": None,
                         "known_at": day + timedelta(hours=2)})
 
@@ -81,7 +82,7 @@ def test_value_is_assessed_when_prices_are_knowable(store):
                        "known_at": as_of - timedelta(hours=1)})
 
     store.upsert("match", pd.DataFrame(matches), ["match_id"])
-    store.upsert("match_result", pd.DataFrame(results), ["match_id"])
+    store.upsert("match_result", pd.DataFrame(results), ["match_id", "source"])
     store.upsert("odds_quote", pd.DataFrame(quotes),
                  ["match_id", "book", "market", "selection", "quoted_at"])
 
@@ -106,7 +107,8 @@ def test_large_divergence_from_the_market_is_flagged(store):
                         "season": "2023-24", "kickoff_utc": day,
                         "home_team_id": teams[i % 2], "away_team_id": teams[(i + 1) % 2],
                         "known_at": day - timedelta(days=30)})
-        results.append({"match_id": f"h{i}", "home_goals": 3, "away_goals": 0,
+        results.append({"match_id": f"h{i}", "source": "t",
+                        "home_goals": 3, "away_goals": 0,
                         "outcome": "H", "ht_home": None, "ht_away": None,
                         "known_at": day + timedelta(hours=2)})
     matches.append({"match_id": "future", "source": "t", "league": "bundesliga",
@@ -119,7 +121,7 @@ def test_large_divergence_from_the_market_is_flagged(store):
                        "quoted_at": as_of, "is_closing": False, "known_at": as_of})
 
     store.upsert("match", pd.DataFrame(matches), ["match_id"])
-    store.upsert("match_result", pd.DataFrame(results), ["match_id"])
+    store.upsert("match_result", pd.DataFrame(results), ["match_id", "source"])
     store.upsert("odds_quote", pd.DataFrame(quotes),
                  ["match_id", "book", "market", "selection", "quoted_at"])
 
