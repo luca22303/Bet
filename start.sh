@@ -24,7 +24,7 @@ fail() { printf '\n%s\n' "$*" >&2; exit 1; }
 
 # zsh does not treat `#` as a comment in an interactive shell unless
 # interactive_comments is set, and it is off by default -- which is every macOS
-# user since Catalina. A line copied as `./start.sh --refresh  # macOS` therefore
+# user since Catalina. A line copied as `sh start.sh --refresh  # macOS` therefore
 # arrives here with the comment as arguments, and the failure surfaces much
 # later as an unrecognised-argument error from a command they did not type.
 for arg in "$@"; do
@@ -35,7 +35,7 @@ for arg in "$@"; do
             say "zsh passes '#' through as an argument rather than starting a comment."
             say ""
             say "Run just this, with nothing after it:"
-            say "  ./start.sh --refresh"
+            say "  sh start.sh --refresh"
             exit 2
             ;;
     esac

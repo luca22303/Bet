@@ -12,7 +12,7 @@ On macOS or Linux:
 git clone https://github.com/luca22303/Bet.git
 cd Bet
 git checkout claude/awesome-davinci-fesnx3
-./start.sh --refresh
+sh start.sh --refresh
 ```
 
 On Windows, run the same three git commands, then `start.bat --refresh` — or

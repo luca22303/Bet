@@ -483,7 +483,7 @@ Closing line value converges in weeks instead of years.
 ## Running it
 
 ```bash
-./start.sh --refresh
+sh start.sh --refresh
 ```
 
 On Windows: double-click `start.bat`, or run `start.bat --refresh`.
