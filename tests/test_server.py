@@ -217,3 +217,47 @@ def test_a_crashing_refresh_leaves_the_server_usable(tmp_path, monkeypatch):
 def test_status_survives_a_missing_database(tmp_path):
     payload = status_payload(ServerState(db_path=tmp_path / "does-not-exist.duckdb"))
     assert "provenance" in payload
+
+
+def test_the_page_renders_while_a_refresh_holds_the_database(running, monkeypatch):
+    """A refresh writes; a request reads. Both at once must work.
+
+    DuckDB permits a process only one configuration per database file, so
+    opening the path read-only while a read-write connection is live raises
+    `ConnectionException`. `bet serve --refresh` does exactly that: it starts a
+    background fetch and the browser hits `/` a moment later, and the page came
+    back as a stack trace instead of a dashboard.
+    """
+    import bet.live as live
+    from bet.live import RefreshReport
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _slow_refresh(store, **kwargs):
+        # Hold the write connection open, exactly as a real fetch would.
+        store.con.execute("SELECT 1").fetchall()
+        holding.set()
+        release.wait(timeout=20)
+        return RefreshReport(started=datetime.utcnow(), seasons=[2026],
+                             rows={"match": 1})
+
+    monkeypatch.setattr(live, "refresh", _slow_refresh)
+
+    base, state = running
+    assert state.begin_refresh()
+    worker = threading.Thread(target=run_refresh, args=(state,), daemon=True)
+    worker.start()
+    try:
+        assert holding.wait(timeout=20), "refresh never opened the store"
+        status, body = _get(f"{base}/")
+        assert status == 200
+        assert "Could not build the dashboard" not in body
+        assert "Bundesliga model" in body
+
+        # The status endpoint opens the store too, on the request thread.
+        _, payload = _get(f"{base}/api/status")
+        assert "error" not in json.loads(payload)["provenance"]
+    finally:
+        release.set()
+        worker.join(timeout=20)

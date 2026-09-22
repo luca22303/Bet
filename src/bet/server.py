@@ -45,6 +45,34 @@ class ServerState:
     last_report: str = ""
     last_error: str = ""
     lock: threading.Lock = field(default_factory=threading.Lock)
+    _con: object | None = None
+    _con_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def cursor(self):
+        """A handle on the database for one request or one refresh.
+
+        DuckDB allows a process only one *configuration* per database file:
+        opening the path read-only while a read-write connection is live
+        raises ConnectionException. This server does both at once -- it
+        renders from the store on every request and writes to it during a
+        refresh -- so opening a fresh connection per caller cannot work.
+
+        Instead it opens one read-write connection for its lifetime and hands
+        each caller a cursor off it. Cursors share the database instance, so
+        there is no second configuration to conflict with; each has its own
+        transaction state, and closing one leaves the rest working.
+        """
+        with self._con_lock:
+            if self._con is None:
+                from bet.store import Store
+                self._con = Store.open(self.db_path).con
+            return self._con.cursor()
+
+    def close(self) -> None:
+        with self._con_lock:
+            if self._con is not None:
+                self._con.close()
+                self._con = None
 
     def begin_refresh(self) -> bool:
         """Claim the right to refresh; False if one is already running."""
@@ -65,16 +93,23 @@ class ServerState:
                 self.last_error = error
 
 
-def _open_store(state: ServerState, *, read_only: bool = False):
+def _open_store(state: ServerState):
+    """A Store for one caller, backed by a cursor on the shared connection.
+
+    There is deliberately no `read_only` argument. Asking for one would be
+    honoured by ignoring it -- see `ServerState.cursor` for why a read-only
+    connection cannot coexist with the refresh path -- and a flag that does
+    nothing is worse than no flag.
+    """
     from bet.store import Store
-    return Store.open(state.db_path, read_only=read_only)
+    return Store(state.cursor())
 
 
 def render_page(state: ServerState) -> str:
     """Build the dashboard from the current contents of the store."""
     from bet.dashboard import build
 
-    with _open_store(state, read_only=True) as store:
+    with _open_store(state) as store:
         return build(store, datetime.utcnow(), days=state.days,
                      league=state.league, served=True)
 
@@ -120,7 +155,7 @@ def status_payload(state: ServerState) -> dict:
         "last_error": state.last_error,
     }
     try:
-        with _open_store(state, read_only=True) as store:
+        with _open_store(state) as store:
             provenance = data_provenance(store, datetime.utcnow())
         payload["provenance"] = {
             "sources": provenance["sources"],
@@ -249,3 +284,4 @@ def serve(db_path: Path | None, *, port: int = 8765, host: str = "127.0.0.1",
         print("\nstopped")
     finally:
         httpd.server_close()
+        state.close()
