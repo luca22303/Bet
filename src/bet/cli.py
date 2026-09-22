@@ -14,6 +14,7 @@
     bet fetch-news                  pull team news from several feeds and extract
     bet watch                       T-60 line-up check and repricing
     bet dashboard --out board.html  static HTML overview
+    bet live --out board.html       fetch live data, then rebuild the dashboard
     bet status                      row counts and the leakage check
     bet check                       point-in-time integrity only
 """
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -527,6 +529,61 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+def cmd_live(args) -> int:
+    """Fetch from the live sources, then rebuild the dashboard.
+
+    Everything here is fetched at the moment you run it. Nothing is bundled.
+    """
+    from bet.live import current_season_start, refresh_and_render
+
+    seasons = (_parse_season_range(args.seasons) if args.seasons
+               else [current_season_start()])
+    sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
+    output = Path(args.out)
+
+    def once() -> int:
+        with Store.open(args.db) as store:
+            report = refresh_and_render(
+                store, output, days=args.days, league=args.league,
+                seasons=seasons, sources=sources, with_shots=args.shots,
+                max_matches=args.max_matches, backtest_from=args.backtest_from)
+            print(report.summary())
+
+            from bet.dashboard import data_provenance
+            provenance = data_provenance(store, datetime.utcnow())
+            if provenance["empty"]:
+                print("\n  nothing in the store — every source failed")
+                return 1
+            if provenance["synthetic"]:
+                print("\n  store still holds only synthetic data")
+                return 1
+            if provenance["stale"]:
+                print(f"\n  newest data is {provenance['worst_age_days']} days old")
+        return 0
+
+    if not args.every:
+        return once()
+
+    # A polling loop for a terminal left open on a matchday. For anything
+    # unattended use cron and drop --every: a scheduler that survives a reboot
+    # beats a shell that does not.
+    interval = max(args.every, 60)
+    print(f"refreshing every {interval}s — Ctrl-C to stop\n")
+    while True:
+        print(f"--- {datetime.utcnow():%Y-%m-%d %H:%M:%S} UTC ---")
+        try:
+            once()
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"  refresh failed: {exc}")
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            print("\nstopped")
+            return 0
+
+
 def _print_leakage(store) -> None:
     report = store.leakage_report()
     total = int(report["violations"].sum())
@@ -686,6 +743,22 @@ def build_parser() -> argparse.ArgumentParser:
                         help="run a walk-forward from this date to fill the "
                              "model-health tab (slow)")
     p_dash.set_defaults(func=cmd_dashboard)
+
+    p_live = sub.add_parser("live", help="fetch live data, then rebuild the dashboard")
+    p_live.add_argument("--out", default="dashboard.html")
+    p_live.add_argument("--seasons", default=None,
+                        help="default: the current season, worked out from today")
+    p_live.add_argument("--sources", default="football_data,openligadb,clubelo",
+                        help="comma-separated; add understat,fbref for xG and players")
+    p_live.add_argument("--days", type=int, default=8)
+    p_live.add_argument("--league", default="bundesliga")
+    p_live.add_argument("--shots", action="store_true", help="Understat shot data (slow)")
+    p_live.add_argument("--max-matches", type=int, default=None,
+                        help="cap FBref match pages per season")
+    p_live.add_argument("--backtest-from", dest="backtest_from", default=None)
+    p_live.add_argument("--every", type=int, default=None,
+                        help="repeat every N seconds (min 60); prefer cron for unattended use")
+    p_live.set_defaults(func=cmd_live)
 
     p_status = sub.add_parser("status", help="row counts and integrity check")
     p_status.set_defaults(func=cmd_status)

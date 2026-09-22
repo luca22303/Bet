@@ -129,6 +129,7 @@ src/bet/
   recommend.py       the matchday brief
   dashboard.py       the static HTML dashboard
   viz.py             inline SVG primitives: pitch, bars, lines, scatter
+  live.py            one-command refresh: fetch, then rebuild
   extract/           LLM extraction: Ollama (default) and Claude backends
   models/            Model contract, baselines, Dixon-Coles, promoted prior, props
   spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
@@ -476,17 +477,70 @@ Closing line value converges in weeks instead of years.
 - Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
+## Keeping it live
+
+The adapters fetch from the public sources themselves — nothing in this project
+is bundled or pre-collected. `bet live` is the whole refresh in one command:
+
+```bash
+bet live --out board.html
+```
+
+That pulls the current season from football-data.co.uk, OpenLigaDB and ClubElo,
+then rebuilds the dashboard from what it pulled. Add `--sources
+football_data,openligadb,clubelo,understat,fbref` for xG and player stats (much
+slower — FBref is ~306 requests a season).
+
+Only the current season is re-fetched, worked out from today's date. Re-scraping
+a decade every run would be slow and rude to sources that owe you nothing.
+
+Unattended, use cron rather than `--every`; a scheduler survives a reboot and a
+shell does not:
+
+```cron
+# Refresh twice daily, and hourly on Saturday afternoons
+0 7,19 * * *   cd /path/to/Bet && bet live --out /var/www/board.html
+0 12-18 * * 6  cd /path/to/Bet && bet live --out /var/www/board.html
+```
+
+`bet live` exits non-zero when nothing landed, the store is still synthetic, or
+the newest row is stale, so a failed refresh shows up in cron mail instead of
+silently serving an old page.
+
+**Why the dashboard can't fetch this itself.** None of these sources send an
+`Access-Control-Allow-Origin` header, so a page requesting them client-side is
+blocked by the browser's same-origin policy before the request leaves. The fetch
+has to happen outside a browser tab — hence Python, and hence a generated file
+rather than a page that refreshes itself.
+
 ## A warning about the example
 
 `dashboard-example.html` in this repo is generated from the **synthetic test
 fixtures**, not Bundesliga data. The player names come from a hardcoded surname
 pool; the stats are Poisson draws. The page says so in red at the top.
 
-Nothing in this project has yet been run against real data, because every source
-(football-data.co.uk, FBref, Understat, ClubElo, OpenLigaDB) is unreachable from
-the environment it was built in. The adapters are written and unit-tested
-against fixture-shaped payloads; the first real `bet ingest` is still the moment
-of truth.
+**No adapter in this project has ever parsed a real page.** Every source is
+unreachable from the environment it was built in, so the adapters are written
+against documented formats and tested against fixture payloads written by the
+same hand — which proves the parser matches its author's idea of the format, not
+that it matches reality.
+
+What *is* proven is everything downstream of ingestion, because that was tested
+against synthetic data where the truth is known by construction: Dixon-Coles
+recovers known team strengths at 0.97 correlation, the prop model recovers known
+shot rates, the point-in-time guard catches a deliberately injected leak, and
+the lineup shift is reproducible across runs.
+
+Expected risk on first contact, lowest to highest:
+
+| Adapter | Risk | Why |
+|---|---|---|
+| football-data.co.uk | low | plain CSV, stable for two decades |
+| ClubElo | low | plain CSV API |
+| OpenLigaDB | low | documented JSON API |
+| Understat | medium | JSON embedded in a `<script>`; breaks if they restyle |
+| FBref | **high** | commented-out tables and two-level headers, never seen live |
+| kicker | **unverified** | written blind; assume it needs fixing |
 
 ## Testing
 
@@ -494,6 +548,6 @@ of truth.
 make test
 ```
 
-326 tests, no network required. Synthetic seasons are generated from known team
+336 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.
