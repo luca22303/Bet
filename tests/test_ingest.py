@@ -319,10 +319,13 @@ def test_a_forbidden_is_not_retried(store, tmp_path):
 def test_persistent_failure_reports_how_many_attempts_were_made(store, tmp_path):
     store.init_schema()
     session = _FakeSession([503, 503, 503])
-    with pytest.raises(RuntimeError, match="after 3 attempts"):
+    with pytest.raises(RuntimeError, match="after 3 attempts") as exc:
         _source(store, tmp_path, session).fetch("http://example.invalid/x", cache=False)
 
     assert len(session.calls) == 3
+    # Callers prefix the URL and the underlying error carries it, so repeating
+    # it here produced "clubelo: <url>: <url>: still failing ...".
+    assert str(exc.value).count("http://example.invalid/x") <= 1
 
 
 def test_a_connection_error_is_retried(store, tmp_path):
@@ -335,3 +338,82 @@ def test_a_connection_error_is_retried(store, tmp_path):
 
     assert text == "body"
     assert len(session.calls) == 2
+
+
+# ---------------------------------------------------------------- clubelo
+
+CLUBELO_CSV = (
+    "Rank,Club,Country,Level,Elo,From,To\n"
+    "1,Bayern,GER,1,1990.5,2026-08-26,2026-09-02\n"
+    "8,Leverkusen,GER,1,1850.1,2026-08-26,2026-09-02\n"
+)
+
+
+def _clubelo(store, tmp_path, session):
+    from bet.ingest.clubelo import ClubEloSource
+    return ClubEloSource(store, session=session, raw_dir=tmp_path, delay=0)
+
+
+class _SchemeSession(_FakeSession):
+    """Answers on https only; http is a gateway error, as reported."""
+
+    def __init__(self):
+        super().__init__([])
+
+    def get(self, url, timeout=None):
+        self.calls.append(url)
+        if url.startswith("http://"):
+            return _FakeResponse(502)
+        return _FakeResponse(200, CLUBELO_CSV)
+
+
+def test_clubelo_falls_back_to_the_other_scheme(store, tmp_path):
+    """http returned 502 for every snapshot, and the source was written off."""
+    from datetime import date
+
+    store.init_schema()
+    session = _SchemeSession()
+    result = _clubelo(store, tmp_path, session).ingest(
+        start=date(2026, 9, 1), end=date(2026, 9, 1), cache=False)
+
+    assert result.errors == []
+    assert result.rows_written["team_rating"] == 2
+    assert any(c.startswith("https://") for c in session.calls)
+
+
+def test_clubelo_probes_the_other_scheme_only_once(store, tmp_path):
+    """Latching on keeps the probe at one extra request, not one per week."""
+    from datetime import date
+
+    store.init_schema()
+    session = _SchemeSession()
+    _clubelo(store, tmp_path, session).ingest(
+        start=date(2026, 9, 1), end=date(2026, 9, 22), cache=False)
+
+    http_calls = [c for c in session.calls if c.startswith("http://")]
+    # One request, for one date: the probe is not retried, and once https has
+    # answered the remaining weeks never touch http again.
+    assert http_calls == ["http://api.clubelo.com/2026-09-01"]
+    assert len([c for c in session.calls if c.startswith("https://")]) >= 3
+
+
+def test_clubelo_reports_both_schemes_when_neither_answers(store, tmp_path):
+    from datetime import date
+
+    class _AllDown(_FakeSession):
+        def __init__(self):
+            super().__init__([])
+
+        def get(self, url, timeout=None):
+            self.calls.append(url)
+            return _FakeResponse(502)
+
+    store.init_schema()
+    result = _clubelo(store, tmp_path, _AllDown()).ingest(
+        start=date(2026, 9, 1), end=date(2026, 9, 1), cache=False)
+
+    assert len(result.errors) == 1
+    message = result.errors[0]
+    assert "no scheme answered" in message
+    assert "http://api.clubelo.com" in message
+    assert "https://api.clubelo.com" in message

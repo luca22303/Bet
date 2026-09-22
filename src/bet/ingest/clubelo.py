@@ -21,11 +21,20 @@ import pandas as pd
 from bet.ingest.base import IngestResult, Source
 from bet.teams import resolve
 
-BASE_URL = "http://api.clubelo.com"
+# ClubElo documents its API as plain http. When http returned 502 for every
+# snapshot in a run -- persistently, not as a blip -- the open question was
+# whether their http endpoint is broken rather than whether the API moved, so
+# both schemes are tried before the source is written off.
+BASE_URLS = ("http://api.clubelo.com", "https://api.clubelo.com")
+BASE_URL = BASE_URLS[0]
 
 
 class ClubEloSource(Source):
     name = "clubelo"
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._base: str | None = None
 
     def ingest(self, start: date, end: date | None = None, step_days: int = 7,
                cache: bool = True) -> IngestResult:
@@ -40,11 +49,10 @@ class ClubEloSource(Source):
 
         current = start
         while current <= end:
-            url = f"{BASE_URL}/{current.isoformat()}"
             try:
-                text, _ = self.fetch(url, suffix=".csv", cache=cache)
+                text, url = self._fetch_snapshot(current, cache=cache)
             except Exception as exc:
-                result.errors.append(f"{url}: {exc}")
+                result.errors.append(str(exc))
                 current += timedelta(days=step_days)
                 continue
             result.documents_fetched += 1
@@ -64,6 +72,33 @@ class ClubEloSource(Source):
             result.rows_written["team_rating"] = self.store.upsert(
                 "team_rating", frame, ["team_id", "source", "valid_from"])
         return result
+
+    def _fetch_snapshot(self, day: date, *, cache: bool) -> tuple[str, str]:
+        """One daily snapshot, over whichever scheme the host answers on.
+
+        The working base is remembered for the rest of the run, so probing
+        costs one extra request in total rather than one per week.
+        """
+        bases = (self._base,) if self._base else BASE_URLS
+        attempts: list[str] = []
+
+        for index, base in enumerate(bases):
+            url = f"{base}/{day.isoformat()}"
+            # While still deciding which scheme works, spend one request per
+            # candidate rather than the full retry budget on each: the point of
+            # the probe is to move on quickly, and the winner gets the retries.
+            probing = len(bases) > 1 and index < len(bases) - 1
+            try:
+                text, _ = self.fetch(url, suffix=".csv", cache=cache,
+                                     attempts=1 if probing else 3)
+            except Exception as exc:
+                attempts.append(f"{base} -> {exc}")
+                continue
+            self._base = base
+            return text, url
+
+        raise RuntimeError(
+            f"clubelo {day.isoformat()}: no scheme answered — " + "; ".join(attempts))
 
     def _parse_snapshot(self, frame: pd.DataFrame, snapshot: date) -> list[dict]:
         rows = []

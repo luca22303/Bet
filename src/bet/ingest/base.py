@@ -116,8 +116,10 @@ class Source(ABC):
                     # a refresh of a dozen URLs does not become a coffee break.
                     time.sleep(self.delay * (2 ** attempt))
 
-        raise RuntimeError(
-            f"{url}: still failing after {attempts} attempts — {last}") from last
+        # The URL is not repeated here: every caller prefixes it, and the
+        # underlying error carries it too, which made one failure read as
+        # "clubelo: <url>: <url>: still failing ...".
+        raise RuntimeError(f"still failing after {attempts} attempts — {last}") from last
 
     def _record_document(self, doc_id: str, url: str, text: str, path: Path) -> None:
         frame = pd.DataFrame([{
