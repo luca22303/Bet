@@ -188,8 +188,8 @@ def cmd_predict(args) -> int:
         fixtures = store.fixtures_between(as_of, as_of + timedelta(days=args.days),
                                           league=args.league)
         if fixtures.empty:
-            print(f"no fixtures in the next {args.days} days")
-            print("fixture lists come from openligadb: bet ingest --source openligadb")
+            from bet.recommend import no_fixtures_message
+            print(no_fixtures_message(store, as_of, args.days, args.league))
             return 1
 
         probs = model.predict(store, fixtures, as_of)
@@ -233,7 +233,8 @@ def cmd_props(args) -> int:
         fixtures = store.fixtures_between(as_of, as_of + timedelta(days=args.days),
                                           league=args.league)
         if fixtures.empty:
-            print(f"no fixtures in the next {args.days} days")
+            from bet.recommend import no_fixtures_message
+            print(no_fixtures_message(store, as_of, args.days, args.league))
             return 1
 
         # Expected goals come from the match model, so the prop and the 1X2

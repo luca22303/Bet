@@ -55,11 +55,35 @@ class MatchRecommendation:
     lineups: dict[str, object] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
+    # Set only for a played match shown retrospectively (the previous
+    # matchday). None for anything still in the future -- there is nothing to
+    # compare a prediction against yet, and `predicted_correct` below reflects
+    # that by staying None too rather than guessing.
+    actual_home_goals: float | None = None
+    actual_away_goals: float | None = None
+    actual_outcome: str | None = None
+
     @property
     def headline(self) -> str:
         best = max(self.probabilities, key=self.probabilities.get)
         label = {"H": self.home_team, "D": "draw", "A": self.away_team}[best]
         return f"{label} {self.probabilities[best]:.0%}"
+
+    @property
+    def predicted_outcome(self) -> str:
+        """The model's most likely result, as an outcome letter."""
+        return max(self.probabilities, key=self.probabilities.get)
+
+    @property
+    def predicted_correct(self) -> bool | None:
+        """Whether the model's top pick matches what happened.
+
+        None when there is no actual result to check against -- a future
+        fixture is neither right nor wrong yet.
+        """
+        if self.actual_outcome is None:
+            return None
+        return self.predicted_outcome == self.actual_outcome
 
 
 @dataclass
@@ -70,6 +94,15 @@ class MatchdayBrief:
     prop_picks: pd.DataFrame = field(default_factory=pd.DataFrame)
     warnings: list[str] = field(default_factory=list)
     narrative: str | None = None
+    # Free-text description of what "the coming fixtures" meant here -- "the
+    # next matchday" or "the next 8 days" -- so display code does not need to
+    # reverse-engineer it from window_days. Falls back to the day-window
+    # phrasing when unset, which keeps every existing caller's text unchanged.
+    label: str | None = None
+
+    @property
+    def scope_label(self) -> str:
+        return self.label or f"in the next {self.window_days} days"
 
     @property
     def value_bet_count(self) -> int:
@@ -79,7 +112,7 @@ class MatchdayBrief:
         """The brief as plain text, with no model in the loop."""
         lines = [
             f"MATCHDAY BRIEF - {self.as_of:%Y-%m-%d %H:%M} UTC",
-            f"{len(self.matches)} fixtures in the next {self.window_days} days",
+            f"{len(self.matches)} fixtures {self.scope_label}",
             "=" * 72,
         ]
 
@@ -87,6 +120,10 @@ class MatchdayBrief:
             lines.append("")
             lines.append(f"{match.home_team} vs {match.away_team}  "
                          f"({match.kickoff:%a %d %b %H:%M})")
+            if match.actual_outcome is not None:
+                verdict = "correct" if match.predicted_correct else "missed"
+                lines.append(f"  full time       {match.actual_home_goals:.0f} - "
+                             f"{match.actual_away_goals:.0f}  ({verdict})")
             lines.append(f"  expected goals  {match.expected_home_goals:.2f} - "
                          f"{match.expected_away_goals:.2f}")
             lines.append("  model           " + "  ".join(
@@ -138,7 +175,7 @@ class MatchdayBrief:
         return "\n".join(lines)
 
 
-def _no_fixtures_message(store, as_of: datetime, days: int, league: str) -> str:
+def no_fixtures_message(store, as_of: datetime, days: int, league: str) -> str:
     """Tell a genuine schedule gap from a real data problem.
 
     An empty lookahead window is not evidence that ingestion is broken: the
@@ -166,13 +203,53 @@ def build_brief(store, as_of: datetime | None = None, *, days: int = 8,
                 max_props: int = 12, tax_mode: TaxMode | str = TaxMode.STAKE_DEDUCTED,
                 tax_rate: float = GERMAN_STAKE_TAX, min_edge: float = 0.02,
                 devig_method: DevigMethod | str = DevigMethod.SHIN) -> MatchdayBrief:
-    """Compile everything the system knows about the coming fixtures."""
-    as_of = as_of or datetime.utcnow()
-    brief = MatchdayBrief(as_of=as_of, window_days=days)
+    """Compile everything the system knows about the coming fixtures.
 
+    The day-window entry point used by `bet predict`/`bet brief` and the CLI's
+    `--days`. The dashboard uses `next_matchday_brief`/`previous_matchday_brief`
+    instead, which share the same core (`build_matchday_brief`) but pick their
+    fixtures by matchday rather than by a fixed window.
+    """
+    as_of = as_of or datetime.utcnow()
     fixtures = store.fixtures_between(as_of, as_of + timedelta(days=days), league=league)
     if fixtures.empty:
-        brief.warnings.append(_no_fixtures_message(store, as_of, days, league))
+        brief = MatchdayBrief(as_of=as_of, window_days=days)
+        brief.warnings.append(no_fixtures_message(store, as_of, days, league))
+        return brief
+
+    return build_matchday_brief(
+        store, fixtures, as_of, xi=xi, use_availability=use_availability,
+        prop_stat=prop_stat, max_props=max_props, tax_mode=tax_mode,
+        tax_rate=tax_rate, min_edge=min_edge, devig_method=devig_method,
+        window_days=days)
+
+
+def build_matchday_brief(store, fixtures: pd.DataFrame, as_of: datetime, *,
+                         xi: float = 0.0018, use_availability: bool = True,
+                         prop_stat: str = "shots", max_props: int = 12,
+                         tax_mode: TaxMode | str = TaxMode.STAKE_DEDUCTED,
+                         tax_rate: float = GERMAN_STAKE_TAX, min_edge: float = 0.02,
+                         devig_method: DevigMethod | str = DevigMethod.SHIN,
+                         window_days: int = 0, label: str | None = None) -> MatchdayBrief:
+    """Recommendations for an explicit set of fixtures, fit as of `as_of`.
+
+    The core shared by every brief this project builds: `build_brief` (a day
+    window, fit on everything known right now) and the matchday-scoped ones in
+    this module (fit on everything known right now for the next matchday, or
+    on only what was known before kickoff for the previous one). All three are
+    "what does the model say about this exact list of matches, using only
+    what was knowable by `as_of`" -- a question that does not care whether
+    `as_of` is in the past or fixtures were chosen by a window or a cluster.
+
+    If `fixtures` carries real `home_goals`/`away_goals`/`outcome` values --
+    which `fixtures_between` attaches for anything already played, regardless
+    of `as_of` -- each `MatchRecommendation` is stamped with the actual result
+    alongside the prediction. A future fixture has none of those, so nothing
+    is stamped and `predicted_correct` stays `None`; this needs no separate
+    flag to tell the two cases apart.
+    """
+    brief = MatchdayBrief(as_of=as_of, window_days=window_days, label=label)
+    if fixtures.empty:
         return brief
 
     match_model = DixonColesModel(xi=xi, use_availability=use_availability).fit(store, as_of)
@@ -200,6 +277,12 @@ def build_brief(store, as_of: datetime | None = None, *, days: int = 8,
             store, match_model, fixture, as_of, odds,
             tax_mode=tax_mode, tax_rate=tax_rate, min_edge=min_edge,
             devig_method=devig_method, use_availability=use_availability)
+
+        if pd.notna(getattr(fixture, "outcome", None)):
+            recommendation.actual_home_goals = float(fixture.home_goals)
+            recommendation.actual_away_goals = float(fixture.away_goals)
+            recommendation.actual_outcome = fixture.outcome
+
         brief.matches.append(recommendation)
 
         if not prop_model.rates.empty:
@@ -220,6 +303,60 @@ def build_brief(store, as_of: datetime | None = None, *, days: int = 8,
         brief.prop_picks = source.nlargest(max_props, "expected").reset_index(drop=True)
 
     return brief
+
+
+def next_matchday_brief(store, as_of: datetime | None = None, *,
+                        league: str = "bundesliga", **kwargs) -> MatchdayBrief:
+    """The next matchday, fit on everything known right now.
+
+    Unlike `build_brief`, this is not a fixed lookahead: it is exactly the
+    fixtures in the next cluster of matches, however many days out that turns
+    out to be, so it does not go blank during an international break the way
+    a fixed window would.
+    """
+    from bet.matchdays import next_matchday
+
+    as_of = as_of or datetime.utcnow()
+    fixtures = next_matchday(store, as_of, league=league)
+    if fixtures.empty:
+        brief = MatchdayBrief(as_of=as_of, window_days=0, label="in the next matchday")
+        brief.warnings.append(no_fixtures_message(store, as_of, 0, league))
+        return brief
+
+    return build_matchday_brief(store, fixtures, as_of, label="in the next matchday", **kwargs)
+
+
+def previous_matchday_brief(store, as_of: datetime | None = None, *,
+                            league: str = "bundesliga",
+                            lead_seconds: int | None = None,
+                            search_days: int | None = None,
+                            **kwargs) -> MatchdayBrief:
+    """The most recently completed matchday, predicted and then checked.
+
+    Fit as of just before it kicked off -- `earliest kickoff - lead time`, the
+    same convention `bet.evaluation.backtest.walk_forward` uses -- so this is
+    a genuine retrodiction: what the model would actually have said, using
+    only what was known at the time, not what it says with the benefit of
+    hindsight. The actual scoreline is attached afterwards for comparison,
+    never fed to the model itself.
+    """
+    from bet.config import SETTINGS
+    from bet.matchdays import previous_matchday
+
+    as_of = as_of or datetime.utcnow()
+    search_kwargs = {} if search_days is None else {"search_days": search_days}
+    fixtures = previous_matchday(store, as_of, league=league, **search_kwargs)
+    if fixtures.empty:
+        brief = MatchdayBrief(as_of=as_of, window_days=0, label="the previous matchday")
+        brief.warnings.append("no completed matchday found yet")
+        return brief
+
+    lead = timedelta(seconds=lead_seconds if lead_seconds is not None
+                     else SETTINGS.prediction_lead_seconds)
+    fit_as_of = pd.Timestamp(fixtures["kickoff_utc"].min()).to_pydatetime() - lead
+
+    return build_matchday_brief(store, fixtures, fit_as_of,
+                                label="in the previous matchday", **kwargs)
 
 
 def _recommend_match(store, model: DixonColesModel, fixture, as_of: datetime,

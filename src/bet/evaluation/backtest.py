@@ -20,6 +20,7 @@ import pandas as pd
 
 from bet.config import OUTCOMES, SETTINGS
 from bet.evaluation.metrics import calibration_table, expected_calibration_error, score_predictions
+from bet.matchdays import group_by_matchday
 from bet.models.base import Model
 
 
@@ -49,14 +50,12 @@ def _matchday_groups(fixtures: pd.DataFrame, gap_hours: int = 36) -> list[pd.Dat
 
     Bundesliga weekends cluster Friday to Sunday, with midweek rounds appearing
     irregularly, so clustering on gaps is more robust than assuming a calendar.
+
+    Shares its definition of "a matchday" with `bet.matchdays`, which the
+    dashboard uses to find the previous and next one to display -- one
+    clustering rule, not two that could quietly disagree.
     """
-    if fixtures.empty:
-        return []
-    ordered = fixtures.sort_values("kickoff_utc").reset_index(drop=True)
-    kickoffs = pd.to_datetime(ordered["kickoff_utc"])
-    breaks = kickoffs.diff() > pd.Timedelta(hours=gap_hours)
-    group_ids = breaks.cumsum()
-    return [group.reset_index(drop=True) for _, group in ordered.groupby(group_ids)]
+    return group_by_matchday(fixtures, gap_hours=gap_hours)
 
 
 def walk_forward(store, model: Model, *, start: datetime, end: datetime | None = None,

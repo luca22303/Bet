@@ -109,12 +109,25 @@ nav button[aria-selected="true"] { color:var(--ink); border-bottom-color:var(--s
 .tag { display:inline-block; font-size:10.5px; padding:1px 7px; border-radius:20px;
   border:1px solid var(--border); color:var(--muted); }
 .tag.ok { color:var(--good); border-color:var(--good); }
+.tag.miss { color:var(--critical); border-color:var(--critical); }
 .ev { margin-top:9px; padding-top:9px; border-top:1px solid var(--border); font-size:13px; }
 .pos { color:var(--good); font-weight:600; }
+.neg { color:var(--critical); font-weight:600; }
 .note { font-size:12px; color:var(--warning); margin-top:5px; }
 
 .detail { display:none; padding:0 15px 15px; border-top:1px solid var(--border); }
 .card[data-open="1"] .detail { display:block; }
+
+.history { margin-bottom:14px; }
+.history summary { cursor:pointer; list-style:none; font-size:13px;
+  font-weight:600; color:var(--ink-2); padding:9px 2px;
+  display:flex; align-items:center; gap:6px; }
+.history summary::-webkit-details-marker { display:none; }
+.history summary::before { content:"\\25B8"; font-size:11px; color:var(--muted);
+  transition:transform .15s; }
+.history[open] summary::before { transform:rotate(90deg); }
+.history summary:hover { color:var(--ink); }
+.historybody { padding-top:4px; }
 .pitches { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:13px 0; }
 @media (max-width:640px){ .pitches{grid-template-columns:1fr} .tiles{grid-template-columns:1fr 1fr} }
 .pitchwrap { text-align:center; }
@@ -455,6 +468,31 @@ def _bench_list(bench: list[dict]) -> str:
 # -------------------------------------------------------------------- views
 
 
+def _probability_block(match, labels: dict) -> list[str]:
+    """The diverging bar, legend and fair/market odds line.
+
+    Shared by the live fixture card and the history card: both are "here is
+    what the model thought", and the only thing that differs between them is
+    what happened after -- nothing, or a final score.
+    """
+    body = [diverging_bar(match.probabilities, labels)]
+    body.append(
+        '<div class="legend">'
+        f'<span><i class="key" style="background:var(--home)"></i>{esc(labels["H"])} '
+        f'{match.probabilities["H"]:.0%}</span>'
+        f'<span><i class="key" style="background:var(--draw)"></i>Draw '
+        f'{match.probabilities["D"]:.0%}</span>'
+        f'<span><i class="key" style="background:var(--away)"></i>{esc(labels["A"])} '
+        f'{match.probabilities["A"]:.0%}</span></div>')
+
+    meta = ["fair " + " / ".join(f"<b>{match.fair_odds[o]:.2f}</b>" for o in OUTCOMES)]
+    if match.market_odds:
+        meta.append("market " + " / ".join(f"{match.market_odds[o]:.2f}" for o in OUTCOMES))
+    body.append(f'<div class="meta" style="margin-top:7px">'
+                + "".join(f"<span>{m}</span>" for m in meta) + "</div>")
+    return body
+
+
 def _fixture_card(match, detail: dict | None, index: int) -> str:
     labels = {"H": _team(match.home_team), "D": "Draw", "A": _team(match.away_team)}
     classes = "card value" if match.value_bets else "card"
@@ -480,21 +518,7 @@ def _fixture_card(match, detail: dict | None, index: int) -> str:
         f'{match.expected_away_goals:.2f} xG <span class="chev">&#9656;</span></div>'
         f"</div></div>")
 
-    body = [diverging_bar(match.probabilities, labels)]
-    body.append(
-        '<div class="legend">'
-        f'<span><i class="key" style="background:var(--home)"></i>{esc(labels["H"])} '
-        f'{match.probabilities["H"]:.0%}</span>'
-        f'<span><i class="key" style="background:var(--draw)"></i>Draw '
-        f'{match.probabilities["D"]:.0%}</span>'
-        f'<span><i class="key" style="background:var(--away)"></i>{esc(labels["A"])} '
-        f'{match.probabilities["A"]:.0%}</span></div>')
-
-    meta = ["fair " + " / ".join(f"<b>{match.fair_odds[o]:.2f}</b>" for o in OUTCOMES)]
-    if match.market_odds:
-        meta.append("market " + " / ".join(f"{match.market_odds[o]:.2f}" for o in OUTCOMES))
-    body.append(f'<div class="meta" style="margin-top:7px">'
-                + "".join(f"<span>{m}</span>" for m in meta) + "</div>")
+    body = _probability_block(match, labels)
 
     if match.value_bets:
         rows = []
@@ -512,6 +536,61 @@ def _fixture_card(match, detail: dict | None, index: int) -> str:
     return (f'<div class="{classes}" data-open="0">{head}'
             f'<div style="padding:0 15px 13px">{"".join(body)}</div>'
             f"{_match_detail_html(match, detail, index)}</div>")
+
+
+def _history_card(match) -> str:
+    """A played fixture: the point-in-time prediction, and what happened.
+
+    Fit strictly before that matchday kicked off (see
+    `bet.recommend.previous_matchday_brief`), so this is what the model would
+    genuinely have said beforehand -- not a prediction dressed up with
+    hindsight -- shown next to the result it is being judged against.
+    """
+    labels = {"H": _team(match.home_team), "D": "Draw", "A": _team(match.away_team)}
+
+    if match.predicted_correct is True:
+        verdict = '<span class="tag ok">correct</span>'
+    elif match.predicted_correct is False:
+        verdict = '<span class="tag miss">missed</span>'
+    else:
+        verdict = ""
+
+    actual = (f'{match.actual_home_goals:.0f} &ndash; {match.actual_away_goals:.0f}'
+             if match.actual_outcome is not None else "&mdash;")
+
+    # No expand chevron here: unlike a live fixture card, there is no lineup
+    # detail behind this one to reveal, and a clickable-looking header with
+    # nothing to open is worse than a plain one.
+    head = (
+        '<div class="cardhead" style="cursor:default">'
+        f'<div><div class="fixture">{esc(_team(match.home_team))} '
+        f'<span class="kick">vs</span> {esc(_team(match.away_team))}</div>'
+        f'<div class="kick">{match.kickoff:%a %d %b %H:%M} &middot; full time</div></div>'
+        f'<div style="text-align:right"><span class="fixture">{actual}</span> {verdict}'
+        f'<div class="kick">predicted {match.expected_home_goals:.2f} &ndash; '
+        f'{match.expected_away_goals:.2f} xG</div>'
+        "</div></div>")
+
+    body = _probability_block(match, labels)
+
+    if match.value_bets:
+        rows = []
+        for bet in match.value_bets:
+            won = bet["selection"] == match.actual_outcome
+            tag = '<span class="pos">WON</span>' if won else '<span class="neg">LOST</span>'
+            rows.append(f'<div>{tag} {esc(labels[bet["selection"]])} '
+                        f'@ {bet["odds"]:.2f} &middot; EV would have been '
+                        f'<span class="pos">{bet["ev"]:+.1%}</span></div>')
+        body.append(f'<div class="ev">{"".join(rows)}</div>')
+    elif match.market_odds:
+        body.append('<div class="ev" style="color:var(--muted)">'
+                    "no value at the prices knowable beforehand</div>")
+
+    for note in match.notes:
+        body.append(f'<div class="note">{esc(note)}</div>')
+
+    return (f'<div class="card" data-open="0">{head}'
+            f'<div style="padding:0 15px 13px">{"".join(body)}</div></div>')
 
 
 def _match_detail_html(match, detail: dict | None, index: int) -> str:
@@ -598,7 +677,7 @@ def _overview(brief, coverage, quality_report) -> str:
 
     tiles = [
         stat_tile(str(len(brief.matches)), "fixtures",
-                  detail=f"next {brief.window_days} days"),
+                  detail=brief.scope_label),
         stat_tile(str(brief.value_bet_count), "value bets",
                   detail="net of margin and tax" if priced else "no market prices"),
         stat_tile(f"{confirmed}/{total_sides}", "confirmed XIs",
@@ -814,7 +893,30 @@ SERVED_SCRIPT = """
 """
 
 
-def render(store, brief, *, coverage=None, quality_report=None,
+def _previous_matchday_panel(previous) -> str:
+    """A collapsed, expand-on-demand look back at the last matchday.
+
+    Closed by default so the page opens on what is coming up, not what
+    already happened. `<details>` needs no script and keeps its open/closed
+    state across a reload for free, unlike the click-to-expand fixture cards
+    which reset on every render.
+    """
+    if previous is None or not previous.matches:
+        return ""
+
+    scored = [m for m in previous.matches if m.predicted_correct is not None]
+    record = (f" &middot; {sum(1 for m in scored if m.predicted_correct)}/"
+             f"{len(scored)} correct" if scored else "")
+    cards = "".join(_history_card(m) for m in previous.matches)
+
+    return (
+        '<details class="history">'
+        f'<summary>Previous matchday{record}</summary>'
+        f'<div class="historybody">{cards}</div>'
+        "</details>")
+
+
+def render(store, brief, *, previous=None, coverage=None, quality_report=None,
            backtest: dict | None = None, details: dict | None = None,
            provenance: dict | None = None, as_of: datetime | None = None,
            served: bool = False) -> str:
@@ -830,10 +932,11 @@ def render(store, brief, *, coverage=None, quality_report=None,
     controls = CONTROLS if served else ""
     served_script = SERVED_SCRIPT if served else ""
 
+    history_panel = _previous_matchday_panel(previous)
     cards = "".join(_fixture_card(m, details.get(m.match_id), i)
                     for i, m in enumerate(brief.matches))
-    fixtures_view = cards or ('<div class="panel"><div class="empty">'
-                              "No fixtures in the window.</div></div>")
+    fixtures_view = history_panel + (cards or ('<div class="panel"><div class="empty">'
+                                     "No fixtures in the window.</div></div>"))
 
     views = [
         ("overview", "Overview", _overview(brief, coverage, quality_report)),
@@ -857,7 +960,7 @@ def render(store, brief, *, coverage=None, quality_report=None,
 <div class="wrap" style="position:relative">
 <header><h1>Bundesliga model</h1>
 <div class="sub">Generated {generated:%Y-%m-%d %H:%M} UTC &middot;
-{len(brief.matches)} fixture(s) over the next {brief.window_days} days &middot;
+{len(brief.matches)} fixture(s) {brief.scope_label} &middot;
 click a fixture for line-ups and squad stats</div>
 {controls}{banner}
 <nav role="tablist">{tabs}</nav></header>
@@ -874,11 +977,28 @@ check the model-health tab before acting on anything here.</footer>
 def build(store, as_of: datetime | None = None, *, days: int = 8,
           league: str = "bundesliga", include_quality: bool = True,
           backtest_from: str | None = None, served: bool = False) -> str:
-    """Compile a brief, gather per-match detail, and render."""
-    from bet.recommend import build_brief
+    """Compile a brief, gather per-match detail, and render.
+
+    The fixtures shown are the next matchday, not a fixed lookahead: the
+    Bundesliga does not play every week, and a fixed window (the previous
+    behaviour of `days` here) regularly landed empty between matchdays --
+    reported as "no matches displayed" when the store was in fact fully
+    loaded. Matchday scoping cannot go blank that way as long as a next
+    matchday exists at all. `days` still bounds how far back the previous
+    matchday is searched for, which only matters across an unusually long
+    gap (the summer break).
+
+    Above the upcoming fixtures, a collapsed panel holds the previous
+    matchday: what the model would genuinely have said beforehand (fit
+    strictly before it kicked off, never on data that includes its own
+    result) next to what actually happened.
+    """
+    from bet.recommend import next_matchday_brief, previous_matchday_brief
 
     as_of = as_of or datetime.utcnow()
-    brief = build_brief(store, as_of, days=days, league=league)
+    brief = next_matchday_brief(store, as_of, league=league)
+    previous = previous_matchday_brief(
+        store, as_of, league=league, search_days=max(days, 60))
 
     coverage, quality_report = None, None
     if include_quality:
@@ -901,8 +1021,8 @@ def build(store, as_of: datetime | None = None, *, days: int = 8,
                     store, model, match, as_of, rates, name_map)
 
     backtest = _run_backtest(store, backtest_from, league) if backtest_from else None
-    return render(store, brief, coverage=coverage, quality_report=quality_report,
-                  backtest=backtest, details=details,
+    return render(store, brief, previous=previous, coverage=coverage,
+                  quality_report=quality_report, backtest=backtest, details=details,
                   provenance=data_provenance(store, as_of), as_of=as_of,
                   served=served)
 
