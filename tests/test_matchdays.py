@@ -88,3 +88,62 @@ def test_previous_matchday_only_counts_played_matches(store):
 def test_previous_matchday_is_empty_when_nothing_has_been_played(store):
     store.init_schema()
     assert previous_matchday(store, datetime(2024, 9, 22), league="bundesliga").empty
+
+
+def test_next_matchday_keeps_an_already_kicked_off_fixture_from_the_same_round(store):
+    """A round in progress must not lose its Friday match just because
+    kickoff has passed -- that fixture is exactly the one that should now
+    show up coloured by whether the prediction was right."""
+    store.init_schema()
+    friday = datetime(2024, 9, 20, 18, 30)
+    saturday = friday + timedelta(hours=20)
+    as_of = friday + timedelta(hours=2)          # Friday's match has started
+
+    store.upsert("match", pd.DataFrame([
+        {"match_id": "friday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": friday, "home_team_id": "a", "away_team_id": "b",
+         "known_at": friday - timedelta(days=30)},
+        {"match_id": "saturday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": saturday, "home_team_id": "c", "away_team_id": "d",
+         "known_at": saturday - timedelta(days=30)},
+    ]), ["match_id"])
+    store.upsert("match_result", pd.DataFrame([{
+        "match_id": "friday", "source": "t", "home_goals": 2, "away_goals": 0,
+        "outcome": "H", "ht_home": 1, "ht_away": 0,
+        "known_at": friday + timedelta(hours=2),
+    }]), ["match_id", "source"])
+
+    fixtures = next_matchday(store, as_of, league="bundesliga")
+    assert set(fixtures["match_id"]) == {"friday", "saturday"}
+
+
+def test_next_matchday_does_not_merge_in_the_actually_previous_round(store):
+    """Widening the search window to look backward from the anchor must not
+    pull in fixtures from the round before -- the gap still separates them."""
+    store.init_schema()
+    last_week = datetime(2024, 9, 13, 15, 30)
+    this_friday = datetime(2024, 9, 20, 18, 30)
+    this_saturday = this_friday + timedelta(hours=20)
+    as_of = this_friday + timedelta(hours=2)
+
+    store.upsert("match", pd.DataFrame([
+        {"match_id": "last_week", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": last_week, "home_team_id": "a", "away_team_id": "b",
+         "known_at": last_week - timedelta(days=30)},
+        {"match_id": "friday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": this_friday, "home_team_id": "c", "away_team_id": "d",
+         "known_at": this_friday - timedelta(days=30)},
+        {"match_id": "saturday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": this_saturday, "home_team_id": "e", "away_team_id": "f",
+         "known_at": this_saturday - timedelta(days=30)},
+    ]), ["match_id"])
+    store.upsert("match_result", pd.DataFrame([
+        {"match_id": "last_week", "source": "t", "home_goals": 1, "away_goals": 1,
+         "outcome": "D", "ht_home": 0, "ht_away": 0, "known_at": last_week + timedelta(hours=2)},
+        {"match_id": "friday", "source": "t", "home_goals": 2, "away_goals": 0,
+         "outcome": "H", "ht_home": 1, "ht_away": 0, "known_at": this_friday + timedelta(hours=2)},
+    ]), ["match_id", "source"])
+
+    fixtures = next_matchday(store, as_of, league="bundesliga")
+    assert set(fixtures["match_id"]) == {"friday", "saturday"}
+    assert "last_week" not in set(fixtures["match_id"])

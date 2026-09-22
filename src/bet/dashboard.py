@@ -82,6 +82,8 @@ nav button[aria-selected="true"] { color:var(--ink); border-bottom-color:var(--s
 .card { background:var(--surface); border:1px solid var(--border); border-radius:10px;
   margin-bottom:9px; overflow:hidden; }
 .card.value { border-color:var(--s3); }
+.card.correct { border-color:var(--good); border-width:1px 1px 1px 3px; }
+.card.miss { border-color:var(--critical); border-width:1px 1px 1px 3px; }
 .cardhead { display:grid; grid-template-columns:1fr auto; gap:10px; padding:13px 15px;
   cursor:pointer; align-items:center; }
 .cardhead:hover { background:color-mix(in srgb, var(--ink) 4%, transparent); }
@@ -468,6 +470,30 @@ def _bench_list(bench: list[dict]) -> str:
 # -------------------------------------------------------------------- views
 
 
+def _outcome_class(match) -> str:
+    """`card correct`/`card miss` once a result is known, else `""`.
+
+    Shared so a fixture that finishes while still shown as part of the
+    current matchday gets exactly the same treatment as one already moved
+    into the previous-matchday panel -- the same fact, the same colour,
+    wherever the card happens to live.
+    """
+    if match.predicted_correct is True:
+        return "card correct"
+    if match.predicted_correct is False:
+        return "card miss"
+    return ""
+
+
+def _verdict_tag(match) -> str:
+    """The text form of the same verdict -- colour is never the only signal."""
+    if match.predicted_correct is True:
+        return '<span class="tag ok">correct</span>'
+    if match.predicted_correct is False:
+        return '<span class="tag miss">missed</span>'
+    return ""
+
+
 def _probability_block(match, labels: dict) -> list[str]:
     """The diverging bar, legend and fair/market odds line.
 
@@ -494,27 +520,50 @@ def _probability_block(match, labels: dict) -> list[str]:
 
 
 def _fixture_card(match, detail: dict | None, index: int) -> str:
-    labels = {"H": _team(match.home_team), "D": "Draw", "A": _team(match.away_team)}
-    classes = "card value" if match.value_bets else "card"
+    """A fixture in the current matchday.
 
-    score = (detail or {}).get("score") or {}
-    if score.get("score"):
-        score_html = (f'<span class="fixture" data-tip="most likely scoreline &middot; '
-                      f'{score["probability"]:.1%}">{esc(score["score"])}</span>')
+    Most of these are still to be played and carry no verdict. One that has
+    already kicked off and finished -- the round is a weekend, and not every
+    match in it shares a kick-off time -- gets the same green/red treatment
+    as a card in the previous-matchday panel, for the same reason: the result
+    is known, so the card should say whether the model called it.
+    """
+    labels = {"H": _team(match.home_team), "D": "Draw", "A": _team(match.away_team)}
+    outcome_class = _outcome_class(match)
+    # A settled result outranks the value-bet accent -- whether the pick was
+    # right is the more important fact once it is knowable, and the value bet
+    # itself is still shown (and marked won/lost) in the body below.
+    classes = outcome_class or ("card value" if match.value_bets else "card")
+
+    if match.actual_outcome is not None:
+        score_html = (f'<span class="fixture">{match.actual_home_goals:.0f} '
+                     f'&ndash; {match.actual_away_goals:.0f}</span>')
+        head_tip = "full time"
     else:
-        # Deliberately blank: the model cannot separate the leading scorelines,
-        # and a number here would dress a coin-flip as a prediction.
-        score_html = ('<span class="kick" data-tip="'
-                      + esc(score.get("reason", "no scoreline prediction"))
-                      + '">&mdash;</span>')
+        score = (detail or {}).get("score") or {}
+        if score.get("score"):
+            score_html = (f'<span class="fixture" data-tip="most likely scoreline &middot; '
+                        f'{score["probability"]:.1%}">{esc(score["score"])}</span>')
+        else:
+            # Deliberately blank: the model cannot separate the leading
+            # scorelines, and a number here would dress a coin-flip as a
+            # prediction.
+            score_html = ('<span class="kick" data-tip="'
+                        + esc(score.get("reason", "no scoreline prediction"))
+                        + '">&mdash;</span>')
+        head_tip = None
+
+    verdict = _verdict_tag(match)
+    kick_line = (f'{match.kickoff:%a %d %b %H:%M}' + (f" &middot; {head_tip}" if head_tip else ""))
 
     head = (
         f'<div class="cardhead" role="button" tabindex="0" aria-expanded="false">'
         f'<div><div class="fixture">{esc(_team(match.home_team))} '
         f'<span class="kick">vs</span> {esc(_team(match.away_team))}</div>'
-        f'<div class="kick">{match.kickoff:%a %d %b %H:%M}</div></div>'
-        f'<div style="text-align:right">{score_html}'
-        f'<div class="kick">{match.expected_home_goals:.2f} &ndash; '
+        f'<div class="kick">{kick_line}</div></div>'
+        f'<div style="text-align:right">{score_html} {verdict}'
+        f'<div class="kick">{"predicted " if match.actual_outcome is not None else ""}'
+        f'{match.expected_home_goals:.2f} &ndash; '
         f'{match.expected_away_goals:.2f} xG <span class="chev">&#9656;</span></div>'
         f"</div></div>")
 
@@ -547,13 +596,7 @@ def _history_card(match) -> str:
     hindsight -- shown next to the result it is being judged against.
     """
     labels = {"H": _team(match.home_team), "D": "Draw", "A": _team(match.away_team)}
-
-    if match.predicted_correct is True:
-        verdict = '<span class="tag ok">correct</span>'
-    elif match.predicted_correct is False:
-        verdict = '<span class="tag miss">missed</span>'
-    else:
-        verdict = ""
+    verdict = _verdict_tag(match)
 
     actual = (f'{match.actual_home_goals:.0f} &ndash; {match.actual_away_goals:.0f}'
              if match.actual_outcome is not None else "&mdash;")
@@ -589,7 +632,8 @@ def _history_card(match) -> str:
     for note in match.notes:
         body.append(f'<div class="note">{esc(note)}</div>')
 
-    return (f'<div class="card" data-open="0">{head}'
+    classes = _outcome_class(match) or "card"
+    return (f'<div class="{classes}" data-open="0">{head}'
             f'<div style="padding:0 15px 13px">{"".join(body)}</div></div>')
 
 

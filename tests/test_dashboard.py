@@ -356,13 +356,11 @@ def test_the_page_shows_a_previous_matchday_panel(store_with_players):
 
 def test_the_next_matchday_fixtures_share_one_kickoff(store_with_players):
     """Matchday-scoped, not a day window: every card in the tab is one round."""
-    import re
+    from bet.recommend import next_matchday_brief
 
-    page = build(store_with_players, datetime(2024, 1, 5), days=8)
-    kickoffs = set(re.findall(
-        r'<div class="kick">((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2} \w{3} \d{2}:\d{2})</div>',
-        page))
-    assert len(kickoffs) == 1
+    brief = next_matchday_brief(store_with_players, datetime(2024, 1, 5))
+    assert brief.matches
+    assert len({m.kickoff for m in brief.matches}) == 1
 
 
 def test_next_matchday_does_not_go_blank_in_a_schedule_gap(store):
@@ -410,3 +408,48 @@ def test_a_missed_prediction_is_tagged_distinctly_from_a_correct_one(store_with_
         assert 'class="tag ok"' in page
     if '"tag miss">missed' in page:
         assert 'class="tag miss"' in page
+
+
+def test_a_finished_match_in_the_current_matchday_is_coloured(store):
+    """A round is a weekend: Friday's match can be over while Saturday's is
+    still to come, and Friday's card must show the verdict and be coloured,
+    not silently drop out of the fixtures tab or sit there unexplained."""
+    import numpy as np
+
+    from conftest import TEAMS, generate_season
+
+    store.init_schema()
+    rng = np.random.default_rng(9)
+    matches, results, quotes = generate_season(
+        datetime(2022, 8, 10, 15, 30), "2022-23", rng)
+    store.upsert("match", matches, ["match_id"])
+    store.upsert("match_result", results, ["match_id", "source"])
+    store.upsert("odds_quote", quotes,
+                 ["match_id", "book", "market", "selection", "quoted_at"])
+
+    friday = datetime(2024, 9, 20, 18, 30)
+    saturday = friday + timedelta(hours=20)
+    as_of = friday + timedelta(hours=3)          # Friday's match has finished
+
+    store.upsert("match", pd.DataFrame([
+        {"match_id": "friday", "source": "t", "league": "bundesliga",
+         "season": "2024-25", "kickoff_utc": friday,
+         "home_team_id": TEAMS[0], "away_team_id": TEAMS[1],
+         "known_at": friday - timedelta(days=30)},
+        {"match_id": "saturday", "source": "t", "league": "bundesliga",
+         "season": "2024-25", "kickoff_utc": saturday,
+         "home_team_id": TEAMS[2], "away_team_id": TEAMS[3],
+         "known_at": saturday - timedelta(days=30)},
+    ]), ["match_id"])
+    store.upsert("match_result", pd.DataFrame([{
+        "match_id": "friday", "source": "t", "home_goals": 2, "away_goals": 0,
+        "outcome": "H", "ht_home": 1, "ht_away": 0,
+        "known_at": friday + timedelta(hours=2),
+    }]), ["match_id", "source"])
+
+    page = build(store, as_of, days=8, include_quality=False, served=False)
+
+    assert "full time" in page                    # Friday's card is resolved
+    assert 'class="card correct"' in page or 'class="card miss"' in page
+    # Saturday's card is still a plain, unresolved one.
+    assert 'class="card"' in page or 'class="card value"' in page
