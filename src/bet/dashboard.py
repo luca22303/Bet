@@ -755,7 +755,10 @@ SERVED_SCRIPT = """
   function poll(){
     fetch('/api/status').then(function(r){ return r.json(); }).then(function(s){
       if(s.refreshing){
-        say('<span class="spin"></span>fetching from the sources...');
+        // Naming the source makes a slow run legible. "fetching from the
+        // sources" for ten minutes is indistinguishable from a hang.
+        var where = s.progress ? ' &mdash; ' + s.progress : '';
+        say('<span class="spin"></span>fetching from the sources' + where);
         setTimeout(poll, 1500);
         return;
       }

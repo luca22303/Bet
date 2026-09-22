@@ -144,3 +144,44 @@ def test_a_very_long_error_list_says_how_many_are_hidden():
     text = report.summary()
     assert "25 error(s)" in text
     assert "and 5 more" in text
+
+
+def test_refresh_reports_which_source_it_is_on(store, monkeypatch):
+    """A run with no sign of life reads exactly like a hang."""
+    from bet.live import refresh
+
+    seen = []
+    store.init_schema()
+
+    import bet.ingest.football_data as fd
+    import bet.ingest.openligadb as olg
+    import bet.ingest.clubelo as ce
+
+    class _Nothing:
+        def __init__(self, name):
+            self.name = name
+
+        def ingest(self, **kwargs):
+            from bet.ingest.base import IngestResult
+            return IngestResult(source=self.name)
+
+    monkeypatch.setattr(fd, "FootballDataSource", lambda store: _Nothing("football_data"))
+    monkeypatch.setattr(olg, "OpenLigaDBSource", lambda store: _Nothing("openligadb"))
+    monkeypatch.setattr(ce, "ClubEloSource", lambda store: _Nothing("clubelo"))
+
+    refresh(store, seasons=[2026],
+            sources=("football_data", "openligadb", "clubelo"),
+            on_progress=seen.append)
+
+    assert seen == ["football_data (1 of 3)",
+                    "openligadb (2 of 3)",
+                    "clubelo (3 of 3)"]
+
+
+def test_progress_is_optional():
+    """`bet live` and the tests call refresh without a callback."""
+    import inspect
+
+    from bet.live import refresh
+
+    assert inspect.signature(refresh).parameters["on_progress"].default is None

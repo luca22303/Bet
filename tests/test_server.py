@@ -387,3 +387,31 @@ def test_reset_connection_hands_out_a_working_cursor_afterwards(tmp_path):
     assert second.execute("SELECT count(*) FROM match").fetchone() == (0,)
     second.close()
     state.close()
+
+
+def test_status_reports_which_source_the_refresh_is_on(tmp_path, monkeypatch):
+    import bet.live as live
+    from bet.live import RefreshReport
+
+    from bet.store import Store
+    db = tmp_path / "progress.duckdb"
+    with Store.open(db) as store:
+        store.init_schema()
+
+    state = ServerState(db_path=db)
+    seen = []
+
+    def _reporting(store, **kwargs):
+        kwargs["on_progress"]("clubelo (3 of 3)")
+        seen.append(status_payload(state)["progress"])
+        return RefreshReport(started=datetime.utcnow(), seasons=[2026], rows={"match": 1})
+
+    monkeypatch.setattr(live, "refresh", _reporting)
+    state.begin_refresh()
+    run_refresh(state)
+
+    assert seen == ["clubelo (3 of 3)"]
+    # Cleared once the run is over, so a finished refresh does not keep
+    # claiming to be on a source.
+    assert status_payload(state)["progress"] == ""
+    state.close()

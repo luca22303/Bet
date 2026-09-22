@@ -417,3 +417,62 @@ def test_clubelo_reports_both_schemes_when_neither_answers(store, tmp_path):
     assert "no scheme answered" in message
     assert "http://api.clubelo.com" in message
     assert "https://api.clubelo.com" in message
+
+
+# ----------------------------------------------------- giving up on a source
+
+class _Hanging(_FakeSession):
+    """Always 502, like a host whose gateway is down."""
+
+    def __init__(self):
+        super().__init__([])
+
+    def get(self, url, timeout=None):
+        self.calls.append(url)
+        return _FakeResponse(502)
+
+
+def test_a_dead_source_is_given_up_on_rather_than_retried_forever(store, tmp_path):
+    """Retries make one failure survivable and a dead host far more expensive.
+
+    ClubElo walks four weekly snapshots. At three attempts each over two
+    schemes, a host that hangs rather than refusing cost minutes per snapshot
+    and the refresh looked frozen.
+    """
+    from datetime import date
+
+    store.init_schema()
+    session = _Hanging()
+    result = _clubelo(store, tmp_path, session).ingest(
+        start=date(2026, 9, 1), end=date(2026, 9, 22), cache=False)
+
+    # Four snapshots, each of which would otherwise spend four requests.
+    assert len(session.calls) < 8, f"kept trying a dead host: {len(session.calls)} requests"
+    assert result.errors
+    assert any("gave up" in e for e in result.errors)
+
+
+def test_the_breaker_resets_when_a_request_succeeds(store, tmp_path):
+    """A flaky source must not be written off for the rest of the run."""
+    store.init_schema()
+    session = _FakeSession([502, 502, 502, 200])
+    probe = _source(store, tmp_path, session)
+
+    with pytest.raises(RuntimeError):
+        probe.fetch("http://example.invalid/a", cache=False)
+    assert probe._consecutive_failures == 1
+
+    text, _ = probe.fetch("http://example.invalid/b", cache=False)
+    assert text == "body"
+    assert probe._consecutive_failures == 0
+
+
+def test_giving_up_names_the_source_and_the_skipped_url(store, tmp_path):
+    from bet.ingest.base import SourceUnavailable
+
+    store.init_schema()
+    probe = _source(store, tmp_path, _Hanging())
+    probe._consecutive_failures = probe.MAX_CONSECUTIVE_FAILURES
+
+    with pytest.raises(SourceUnavailable, match="probe gave up"):
+        probe.fetch("http://example.invalid/late", cache=False)

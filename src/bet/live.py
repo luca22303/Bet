@@ -76,7 +76,7 @@ class RefreshReport:
 def refresh(store, *, seasons: list[int] | None = None, league: str = "bundesliga",
             sources: tuple[str, ...] = ("football_data", "openligadb", "clubelo"),
             with_shots: bool = False, max_matches: int | None = None,
-            cache: bool = False) -> RefreshReport:
+            cache: bool = False, on_progress=None) -> RefreshReport:
     """Pull the latest data from the live sources.
 
     `cache` defaults to False, unlike a historical backfill: the current
@@ -87,22 +87,35 @@ def refresh(store, *, seasons: list[int] | None = None, league: str = "bundeslig
     seasons = seasons or [current_season_start()]
     report = RefreshReport(started=datetime.utcnow(), seasons=seasons)
 
+    # A refresh behind a button takes minutes and gives no sign of life
+    # otherwise, which reads exactly like a hang. `on_progress` is called with
+    # the source about to run and its place in the queue.
+    planned = [name for name in ("football_data", "openligadb", "clubelo",
+                                 "understat", "fbref") if name in sources]
+
+    def announce(name: str) -> None:
+        if on_progress is not None:
+            on_progress(f"{name} ({planned.index(name) + 1} of {len(planned)})")
+
     store.init_schema()
 
     if "football_data" in sources:
         from bet.ingest.football_data import FootballDataSource
+        announce("football_data")
         report.sources["football_data"] = "results, odds, team stats"
         _run(report, FootballDataSource(store), seasons=seasons, league=league,
              cache=cache)
 
     if "openligadb" in sources:
         from bet.ingest.openligadb import OpenLigaDBSource
+        announce("openligadb")
         report.sources["openligadb"] = "fixtures, results"
         _run(report, OpenLigaDBSource(store), seasons=seasons, league=league,
              cache=cache)
 
     if "clubelo" in sources:
         from bet.ingest.clubelo import ClubEloSource
+        announce("clubelo")
         report.sources["clubelo"] = "power ratings"
         # Only the recent window: older snapshots never change, so re-walking
         # them every run is pure waste.
@@ -112,12 +125,14 @@ def refresh(store, *, seasons: list[int] | None = None, league: str = "bundeslig
 
     if "understat" in sources:
         from bet.ingest.understat import UnderstatSource
+        announce("understat")
         report.sources["understat"] = f"xG shots={'yes' if with_shots else 'no'}"
         _run(report, UnderstatSource(store), seasons=seasons, league=league,
              with_shots=with_shots, cache=cache)
 
     if "fbref" in sources:
         from bet.ingest.fbref import FBrefSource
+        announce("fbref")
         report.sources["fbref"] = "player stats, line-ups"
         _run(report, FBrefSource(store), seasons=seasons, league=league,
              cache=cache, max_matches=max_matches)

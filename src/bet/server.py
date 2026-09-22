@@ -45,9 +45,15 @@ class ServerState:
     last_report: str = ""
     last_error: str = ""
     last_errors: list[str] = field(default_factory=list)
+    progress: str = ""
     lock: threading.Lock = field(default_factory=threading.Lock)
     _con: object | None = None
     _con_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def set_progress(self, what: str) -> None:
+        """Called by the refresh as it moves between sources."""
+        with self.lock:
+            self.progress = what
 
     def reset_connection(self) -> None:
         """Drop the shared connection so the next caller opens a fresh one.
@@ -105,6 +111,7 @@ class ServerState:
             self.refreshing = True
             self.last_error = ""
             self.last_errors = []
+            self.progress = "starting"
             return True
 
     def end_refresh(self, report: str = "", error: str = "",
@@ -119,6 +126,7 @@ class ServerState:
             # for six different reasons, and showing one of them means fixing
             # them one round-trip at a time.
             self.last_errors = list(errors or [])
+            self.progress = ""
 
 
 def _open_store(state: ServerState):
@@ -162,11 +170,13 @@ def run_refresh(state: ServerState) -> None:
     try:
         try:
             with _open_store(state) as store:
-                report = refresh(store, league=state.league, sources=state.sources)
+                report = refresh(store, league=state.league, sources=state.sources,
+                                 on_progress=state.set_progress)
         except duckdb.FatalException:
             state.reset_connection()
             with _open_store(state) as store:
-                report = refresh(store, league=state.league, sources=state.sources)
+                report = refresh(store, league=state.league, sources=state.sources,
+                                 on_progress=state.set_progress)
 
         # `refresh` collects per-source failures rather than raising, so a run
         # where every source was unreachable returns normally. Reporting that as
@@ -203,6 +213,7 @@ def status_payload(state: ServerState) -> dict:
         "last_report": state.last_report,
         "last_error": state.last_error,
         "last_errors": state.last_errors,
+        "progress": state.progress,
     }
     try:
         try:

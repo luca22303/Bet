@@ -28,6 +28,17 @@ import requests
 from bet.config import SETTINGS
 
 
+class SourceUnavailable(RuntimeError):
+    """A source has failed often enough that trying again is just waiting.
+
+    Retries make a single failure cheaper to survive and a dead source far more
+    expensive: ClubElo walks four weekly snapshots, and at three attempts each
+    over two schemes a host that hangs rather than refusing costs minutes per
+    snapshot. A refresh behind a button in a browser cannot take fourteen
+    minutes to conclude a site is down.
+    """
+
+
 @dataclass
 class IngestResult:
     source: str
@@ -55,11 +66,13 @@ class Source(ABC):
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.delay = SETTINGS.request_delay_seconds if delay is None else delay
         self._last_request = 0.0
+        self._consecutive_failures = 0
 
     # ------------------------------------------------------------ fetching
 
     def fetch(self, url: str, *, suffix: str = ".txt", cache: bool = True,
-              timeout: int = 45, attempts: int = 3) -> tuple[str, Path]:
+              timeout: tuple[int, int] | int = (10, 30),
+              attempts: int = 3) -> tuple[str, Path]:
         """Fetch a URL, archive the body, and return (text, path).
 
         With `cache=True` an already-archived URL is read from disk. Re-running
@@ -82,13 +95,24 @@ class Source(ABC):
     # just annoys a free service that owes us nothing.
     RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
-    def _get_with_retries(self, url: str, *, timeout: int, attempts: int) -> str:
+    # Consecutive exhausted fetches before the source is given up on for this
+    # run. Each one has already used its own retries, so three is six or more
+    # requests -- enough to tell "down" from "slow".
+    MAX_CONSECUTIVE_FAILURES = 3
+
+    def _get_with_retries(self, url: str, *, timeout: tuple[int, int] | int,
+                          attempts: int) -> str:
         """GET with a bounded retry on transient failures.
 
         ClubElo returned 502 for three consecutive weekly snapshots and the
         whole source was written off, when a gateway error is the textbook
         case for trying again a moment later.
         """
+        if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+            raise SourceUnavailable(
+                f"{self.name} gave up after {self._consecutive_failures} "
+                f"consecutive failures; skipping {url}")
+
         last: Exception | None = None
 
         for attempt in range(1, attempts + 1):
@@ -104,11 +128,13 @@ class Source(ABC):
                     raise requests.HTTPError(                 # pragma: no cover
                         f"{response.status_code} for url: {url}", response=response)
                 response.raise_for_status()
+                self._consecutive_failures = 0
                 return response.text
             except requests.RequestException as exc:
                 self._last_request = time.monotonic()
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 if status is not None and status not in self.RETRYABLE_STATUSES:
+                    self._consecutive_failures += 1
                     raise
                 last = exc
                 if attempt < attempts:
@@ -119,6 +145,7 @@ class Source(ABC):
         # The URL is not repeated here: every caller prefixes it, and the
         # underlying error carries it too, which made one failure read as
         # "clubelo: <url>: <url>: still failing ...".
+        self._consecutive_failures += 1
         raise RuntimeError(f"still failing after {attempts} attempts — {last}") from last
 
     def _record_document(self, doc_id: str, url: str, text: str, path: Path) -> None:
