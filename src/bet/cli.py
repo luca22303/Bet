@@ -15,6 +15,7 @@
     bet watch                       T-60 line-up check and repricing
     bet dashboard --out board.html  static HTML overview
     bet live --out board.html       fetch live data, then rebuild the dashboard
+    bet serve                       run it locally and open it in a browser
     bet diagnose --source fbref     report what a scraped page actually contains
     bet status                      row counts and the leakage check
     bet check                       point-in-time integrity only
@@ -615,6 +616,22 @@ def cmd_diagnose(args) -> int:
         return 0 if diagnosis.ok else 1
 
 
+def cmd_serve(args) -> int:
+    """Run the dashboard as a local web app."""
+    from bet.server import serve
+
+    # The schema has to exist before the first request, or an empty machine
+    # gets a stack trace instead of a page with a Refresh button on it.
+    with Store.open(args.db) as store:
+        store.init_schema()
+
+    serve(args.db, port=args.port, host=args.host, days=args.days,
+          league=args.league,
+          sources=tuple(s.strip() for s in args.sources.split(",") if s.strip()),
+          open_browser=not args.no_open, refresh_on_start=args.refresh)
+    return 0
+
+
 def _print_leakage(store) -> None:
     report = store.leakage_report()
     total = int(report["violations"].sum())
@@ -799,6 +816,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_diag.add_argument("--save-dir", dest="save_dir", default=None,
                         help="where to keep the fetched HTML")
     p_diag.set_defaults(func=cmd_diagnose)
+
+    p_serve = sub.add_parser("serve", help="run it locally and open it in a browser")
+    p_serve.add_argument("--port", type=int, default=8765)
+    p_serve.add_argument("--host", default="127.0.0.1",
+                         help="loopback by default; the refresh endpoint is "
+                              "unauthenticated, so only change this behind a proxy")
+    p_serve.add_argument("--days", type=int, default=8)
+    p_serve.add_argument("--league", default="bundesliga")
+    p_serve.add_argument("--sources", default="football_data,openligadb,clubelo")
+    p_serve.add_argument("--refresh", action="store_true",
+                         help="fetch fresh data as the server starts")
+    p_serve.add_argument("--no-open", action="store_true",
+                         help="do not open a browser")
+    p_serve.set_defaults(func=cmd_serve)
 
     p_status = sub.add_parser("status", help="row counts and integrity check")
     p_status.set_defaults(func=cmd_status)

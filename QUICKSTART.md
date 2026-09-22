@@ -21,7 +21,25 @@ pip install -e .
 bet --help
 ```
 
-## 2. First run — one source only
+## 2. Just run it
+
+```bash
+bet serve --refresh
+```
+
+That starts a local server, fetches the current season in the background, and
+opens `http://127.0.0.1:8765` in your browser. There is a **Refresh data**
+button on the page, so after the first run you never need the terminal again.
+
+Leave it running and bookmark the URL. Everything below is the same thing done
+by hand, which is worth doing once for the backtest in step 4.
+
+The server binds to loopback only. The refresh endpoint fetches from the
+internet and writes to the database with no authentication, which is fine for a
+tool on your own machine and is not fine on a shared network — don't change
+`--host` without putting an authenticating proxy in front of it.
+
+## 3. First backfill — one source only
 
 Start with football-data.co.uk alone. It is plain CSV, it is the source least
 likely to have changed under the parser, and it carries both results **and**
@@ -46,7 +64,7 @@ median closing overround around 4–7%.
 **If club names raise errors,** the message names the club. Send it to me and
 it is a one-line fix to `src/bet/teams.py`.
 
-## 3. The number that decides everything
+## 4. The number that decides everything
 
 ```bash
 bet backtest --from 2018-08-01
@@ -64,22 +82,23 @@ Nothing else in this project matters until you have looked at that table. It is
 also the first real test of whether the maths survives contact with actual
 Bundesliga results rather than the synthetic data it was developed against.
 
-## 4. The dashboard
+## 5. The dashboard
+
+`bet serve` from step 2 already gives you this at `http://127.0.0.1:8765`. For a
+file to mail someone or serve statically:
 
 ```bash
 bet live --out board.html
-open board.html          # or xdg-open / just double-click it
 ```
 
-`bet live` fetches the current season and rebuilds the page in one step. The
-banner at the top tells you what it is built from: **red** means the store still
-holds only test fixtures, **amber** means the data is more than 8 days old, and
-a plain line means it is current.
+The banner at the top tells you what it is built from: **red** means the store
+still holds only test fixtures, **amber** means the data is more than 8 days
+old, and a plain line means it is current.
 
 Click any fixture for the formations, both squads with their per-90 stats, and
 the likely scorelines.
 
-## 5. Add the richer sources
+## 6. Add the richer sources
 
 Once the above works, widen it. In this order, because it is also the order of
 how likely each is to need a fix:
@@ -104,11 +123,10 @@ bet diagnose --source fbref --url https://fbref.com/en/matches/<some-match-page>
 That prints what the page actually contains and saves the HTML. Send me the
 output and the fix is precise rather than a guess.
 
-## 6. Keep it current
+## 7. Keep it current
 
-```bash
-bet live --out board.html
-```
+If you leave `bet serve` running, press **Refresh data** on the page. For a
+file on a schedule, `bet live` does fetch-and-render in one step.
 
 Unattended, use cron rather than a loop — a scheduler survives a reboot:
 
@@ -148,6 +166,7 @@ who is on the bench.
 
 | Command | What it does |
 |---|---|
+| `bet serve` | run it locally and open it in a browser |
 | `bet init` | create the database |
 | `bet ingest --source X` | fetch one source |
 | `bet live --out board.html` | fetch current season, rebuild the dashboard |

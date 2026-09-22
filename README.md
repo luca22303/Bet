@@ -134,6 +134,7 @@ src/bet/
   viz.py             inline SVG primitives: pitch, bars, lines, scatter
   live.py            one-command refresh: fetch, then rebuild
   diagnose.py        report what a scraped page actually contains
+  server.py          the local web app: render on request, refresh on demand
   extract/           LLM extraction: Ollama (default) and Claude backends
   models/            Model contract, baselines, Dixon-Coles, promoted prior, props
   spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
@@ -481,6 +482,33 @@ Closing line value converges in weeks instead of years.
 - Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
+## Running it
+
+```bash
+bet serve --refresh
+```
+
+A local server at `http://127.0.0.1:8765` that renders the dashboard per
+request and carries a **Refresh data** button, so after the first run the
+terminal is optional. Built on the standard library — a web framework would be
+a dependency, a build step and a version to keep current in exchange for
+routing four endpoints.
+
+It binds to loopback and should stay there. The refresh endpoint makes outbound
+requests and writes to the database, and there is no authentication: on a shared
+network that is a remote-controlled scraper. Put it behind an authenticating
+proxy before changing `--host`.
+
+A failed refresh says so on the page with the real reason. `refresh()` collects
+per-source errors rather than raising, so a run where every source was
+unreachable returns normally — reporting that as success would tell you your
+data is fresh when nothing was fetched.
+
+**On Tauri:** it would wrap this in a window, and the real payoff is a bundled
+installable app. It also adds a Rust toolchain and a Node build to a Python
+project for the same page. Worth doing once the data pipeline has proven itself
+against real sources; premature before that.
+
 ## Keeping it live
 
 The adapters fetch from the public sources themselves — nothing in this project
@@ -590,6 +618,6 @@ That's enough to correct the parser without seeing the site.
 make test
 ```
 
-374 tests, no network required. Synthetic seasons are generated from known team
+387 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.

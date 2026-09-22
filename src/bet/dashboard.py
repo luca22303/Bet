@@ -169,6 +169,19 @@ footer { margin-top:38px; color:var(--muted); font-size:12px;
 #tip { position:fixed; pointer-events:none; opacity:0; transition:opacity .1s;
   background:var(--ink); color:var(--page); font-size:11.5px; padding:4px 8px;
   border-radius:5px; z-index:50; white-space:nowrap; }
+.controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  margin-top:14px; padding:10px 14px; border:1px solid var(--border);
+  border-radius:10px; background:var(--surface); font-size:13px; }
+.btn { font:inherit; font-size:13px; padding:5px 13px; border-radius:7px;
+  border:1px solid var(--s1); background:var(--s1); color:#fff; cursor:pointer; }
+.btn:disabled { opacity:.55; cursor:default; }
+.btn.secondary { background:none; color:var(--s1); }
+#refresh-status { color:var(--ink-2); }
+#refresh-status.err { color:var(--critical); }
+.spin { display:inline-block; width:11px; height:11px; margin-right:6px;
+  border:2px solid var(--border); border-top-color:var(--s1); border-radius:50%;
+  animation:spin .8s linear infinite; vertical-align:-1px; }
+@keyframes spin { to { transform:rotate(360deg); } }
 .provenance { border-radius:10px; padding:11px 15px; font-size:12.5px;
   margin:14px 0 0; border:1px solid var(--border); background:var(--surface); }
 .provenance.synthetic { border-color:var(--critical); }
@@ -714,14 +727,82 @@ def _props_view(prop_picks: pd.DataFrame) -> str:
               "cannot be backtested the way match prices can.</div></div>")
 
 
+CONTROLS = """
+<div class="controls">
+  <button class="btn" id="refresh-btn">Refresh data</button>
+  <span id="refresh-status">served locally &middot; the page rebuilds on reload</span>
+  <button class="btn secondary" id="reload-btn">Reload page</button>
+</div>
+"""
+
+SERVED_SCRIPT = """
+(function(){
+  var btn = document.getElementById('refresh-btn');
+  var reload = document.getElementById('reload-btn');
+  var status = document.getElementById('refresh-status');
+  if(!btn) return;
+
+  function say(text, isError){
+    status.innerHTML = text;
+    status.className = isError ? 'err' : '';
+  }
+
+  // Poll while a fetch runs. The refresh happens on a worker thread server
+  // side, so the request returns at once and this reports progress; without
+  // it a click would look like nothing happened for a minute.
+  function poll(){
+    fetch('/api/status').then(function(r){ return r.json(); }).then(function(s){
+      if(s.refreshing){
+        say('<span class="spin"></span>fetching from the sources...');
+        setTimeout(poll, 1500);
+        return;
+      }
+      btn.disabled = false;
+      if(s.last_error){
+        say('refresh failed: ' + s.last_error, true);
+      } else {
+        say('data refreshed &middot; reload to see it');
+        reload.style.display = '';
+      }
+    }).catch(function(){
+      btn.disabled = false;
+      say('lost contact with the server', true);
+    });
+  }
+
+  btn.addEventListener('click', function(){
+    btn.disabled = true;
+    say('<span class="spin"></span>starting...');
+    fetch('/api/refresh', {method:'POST'}).then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d.started){ btn.disabled = false; say(d.reason || 'could not start', true); return; }
+        poll();
+      })
+      .catch(function(){ btn.disabled = false; say('could not reach the server', true); });
+  });
+
+  reload.addEventListener('click', function(){ location.reload(); });
+  reload.style.display = 'none';
+  poll();
+})();
+"""
+
+
 def render(store, brief, *, coverage=None, quality_report=None,
            backtest: dict | None = None, details: dict | None = None,
-           provenance: dict | None = None, as_of: datetime | None = None) -> str:
-    """Assemble the page."""
+           provenance: dict | None = None, as_of: datetime | None = None,
+           served: bool = False) -> str:
+    """Assemble the page.
+
+    `served` adds the refresh control. It is off for a written file, where the
+    button would post to a server that is not there.
+    """
     generated = datetime.utcnow()
     as_of = as_of or generated
     details = details or {}
     banner = _provenance_banner(provenance, as_of) if provenance else ""
+    controls = CONTROLS if served else ""
+    served_script = SERVED_SCRIPT if served else ""
 
     cards = "".join(_fixture_card(m, details.get(m.match_id), i)
                     for i, m in enumerate(brief.matches))
@@ -752,7 +833,7 @@ def render(store, brief, *, coverage=None, quality_report=None,
 <div class="sub">Generated {generated:%Y-%m-%d %H:%M} UTC &middot;
 {len(brief.matches)} fixture(s) over the next {brief.window_days} days &middot;
 click a fixture for line-ups and squad stats</div>
-{banner}
+{controls}{banner}
 <nav role="tablist">{tabs}</nav></header>
 {panes}
 <footer>Fair odds and expected value are net of a {GERMAN_STAKE_TAX:.1%}
@@ -761,12 +842,12 @@ Dixon-Coles fit priced off the expected eleven. A scoreline is shown only when i
 is clearly the most likely one &mdash; a blank means the model cannot separate
 the leading scores, which is most matches. A model edge is not a proven edge:
 check the model-health tab before acting on anything here.</footer>
-</div><script>{SCRIPT}</script></body></html>"""
+</div><script>{SCRIPT}{served_script}</script></body></html>"""
 
 
 def build(store, as_of: datetime | None = None, *, days: int = 8,
           league: str = "bundesliga", include_quality: bool = True,
-          backtest_from: str | None = None) -> str:
+          backtest_from: str | None = None, served: bool = False) -> str:
     """Compile a brief, gather per-match detail, and render."""
     from bet.recommend import build_brief
 
@@ -796,7 +877,8 @@ def build(store, as_of: datetime | None = None, *, days: int = 8,
     backtest = _run_backtest(store, backtest_from, league) if backtest_from else None
     return render(store, brief, coverage=coverage, quality_report=quality_report,
                   backtest=backtest, details=details,
-                  provenance=data_provenance(store, as_of), as_of=as_of)
+                  provenance=data_provenance(store, as_of), as_of=as_of,
+                  served=served)
 
 
 def _run_backtest(store, start: str, league: str) -> dict | None:
