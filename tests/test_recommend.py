@@ -230,3 +230,69 @@ def test_narration_never_computes_anything(store_with_players, as_of):
     assert "never recalculate" in captured["system"]
     # Everything the model sees is already computed.
     assert "probabilities" in captured["prompt"]
+
+
+def test_a_schedule_gap_is_not_reported_as_a_data_problem(store):
+    """An empty lookahead window is not evidence that ingestion is broken.
+
+    The Bundesliga does not play every week, and a fixed window regularly
+    lands between matchdays -- an international break, the winter pause.
+    "run: bet ingest" when the season is fully loaded and simply not playing
+    this week sends someone chasing a problem that does not exist.
+    """
+    import pandas as pd
+
+    from bet.store import Store
+
+    store.init_schema()
+    as_of = datetime(2024, 9, 20)
+    next_kickoff = datetime(2024, 10, 4)          # two weeks out: a real gap
+    matches = pd.DataFrame([{
+        "match_id": "future1", "source": "t", "league": "bundesliga",
+        "season": "2024-25", "kickoff_utc": next_kickoff,
+        "home_team_id": "bayern_munich", "away_team_id": "sc_freiburg",
+        "known_at": as_of - timedelta(days=30),
+    }])
+    store.upsert("match", matches, ["match_id"])
+
+    brief = build_brief(store, as_of, days=8)
+    assert brief.matches == []
+    message = next(w for w in brief.warnings if "fixtures" in w)
+    assert "run: bet ingest" not in message
+    assert "bayern_munich vs sc_freiburg" in message
+    assert "04 Oct" in message
+    assert "14 day(s) away" in message
+
+
+def test_a_genuinely_empty_league_still_points_at_ingest(store):
+    """With no future fixture at all, re-running ingest is the right advice."""
+    store.init_schema()
+    brief = build_brief(store, datetime(2024, 9, 20), days=8)
+    message = next(w for w in brief.warnings if "fixtures" in w)
+    assert "run: bet ingest --source openligadb" in message
+
+
+def test_next_fixture_after_ignores_past_matches(store):
+    import pandas as pd
+
+    store.init_schema()
+    as_of = datetime(2024, 9, 20)
+    store.upsert("match", pd.DataFrame([
+        {"match_id": "past", "source": "t", "league": "bundesliga",
+         "season": "2024-25", "kickoff_utc": as_of - timedelta(days=3),
+         "home_team_id": "a", "away_team_id": "b",
+         "known_at": as_of - timedelta(days=33)},
+        {"match_id": "next", "source": "t", "league": "bundesliga",
+         "season": "2024-25", "kickoff_utc": as_of + timedelta(days=10),
+         "home_team_id": "c", "away_team_id": "d",
+         "known_at": as_of - timedelta(days=20)},
+    ]), ["match_id"])
+
+    upcoming = store.next_fixture_after(as_of, league="bundesliga")
+    assert upcoming is not None
+    assert upcoming["match_id"] == "next"
+
+
+def test_next_fixture_after_returns_none_when_the_league_has_nothing(store):
+    store.init_schema()
+    assert store.next_fixture_after(datetime(2024, 9, 20), league="bundesliga") is None

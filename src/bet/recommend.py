@@ -138,6 +138,28 @@ class MatchdayBrief:
         return "\n".join(lines)
 
 
+def _no_fixtures_message(store, as_of: datetime, days: int, league: str) -> str:
+    """Tell a genuine schedule gap from a real data problem.
+
+    An empty lookahead window is not evidence that ingestion is broken: the
+    Bundesliga does not play every week, and a fixed window regularly lands
+    between matchdays (international breaks, the winter pause). Telling
+    someone to re-run an ingest that already succeeded, when the season is
+    fully loaded and simply not playing this week, sends them chasing a
+    problem that does not exist.
+    """
+    upcoming = store.next_fixture_after(as_of, league=league)
+    if upcoming is None:
+        return (f"no fixtures found for {league} at all - "
+                "run: bet ingest --source openligadb")
+
+    gap_days = (pd.Timestamp(upcoming["kickoff_utc"]) - pd.Timestamp(as_of)).days
+    return (f"no fixtures in the next {days} days, but the season is loaded - "
+            f"the next {league} match is {upcoming['home_team_id']} vs "
+            f"{upcoming['away_team_id']} on {pd.Timestamp(upcoming['kickoff_utc']):%d %b} "
+            f"({gap_days} day(s) away)")
+
+
 def build_brief(store, as_of: datetime | None = None, *, days: int = 8,
                 league: str = "bundesliga", xi: float = 0.0018,
                 use_availability: bool = True, prop_stat: str = "shots",
@@ -150,9 +172,7 @@ def build_brief(store, as_of: datetime | None = None, *, days: int = 8,
 
     fixtures = store.fixtures_between(as_of, as_of + timedelta(days=days), league=league)
     if fixtures.empty:
-        brief.warnings.append(
-            f"no fixtures found in the next {days} days - "
-            "run: bet ingest --source openligadb")
+        brief.warnings.append(_no_fixtures_message(store, as_of, days, league))
         return brief
 
     match_model = DixonColesModel(xi=xi, use_availability=use_availability).fit(store, as_of)

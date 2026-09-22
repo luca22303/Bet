@@ -197,6 +197,33 @@ class Store:
         """
         return self.con.execute(sql, params).df()
 
+    def next_fixture_after(self, as_of: datetime, *,
+                           league: str | None = None) -> pd.Series | None:
+        """The first future fixture beyond `as_of`, whenever it is.
+
+        Used to tell a genuine schedule gap -- an international break, a winter
+        pause -- from a real data problem. `fixtures_between` finding nothing in
+        the next 8 days is not evidence of the latter: the Bundesliga does not
+        play every week, and a fixed lookahead window will regularly land in a
+        gap between matchdays. Without this, the honest response to an empty
+        window was "run: bet ingest", which is actively wrong when the season
+        is fully ingested and simply not playing this week.
+        """
+        where = ["m.kickoff_utc >= ?"]
+        params: list = [as_of]
+        if league:
+            where.append("m.league = ?")
+            params.append(league)
+        sql = f"""
+            SELECT match_id, league, season, kickoff_utc, home_team_id, away_team_id
+            FROM match m
+            WHERE {' AND '.join(where)}
+            ORDER BY m.kickoff_utc
+            LIMIT 1
+        """
+        row = self.con.execute(sql, params).df()
+        return None if row.empty else row.iloc[0]
+
     def odds_as_of(self, as_of: datetime, match_ids: list[str] | None = None,
                    *, market: str = "1x2", book: str | None = None) -> pd.DataFrame:
         """Latest price per (match, book, selection) that was quoted by `as_of`."""
