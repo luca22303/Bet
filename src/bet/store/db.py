@@ -146,7 +146,8 @@ class Store:
         sql = f"""
             SELECT m.match_id, m.league, m.season, m.kickoff_utc,
                    m.home_team_id, m.away_team_id,
-                   r.home_goals, r.away_goals, r.outcome
+                   r.home_goals, r.away_goals, r.outcome,
+                   r.known_at AS result_known_at
             FROM match m
             {join} ({self._preferred_results_sql()}) r ON r.match_id = m.match_id
             WHERE {' AND '.join(where)}
@@ -187,7 +188,8 @@ class Store:
         sql = f"""
             SELECT m.match_id, m.league, m.season, m.kickoff_utc,
                    m.home_team_id, m.away_team_id,
-                   r.home_goals, r.away_goals, r.outcome
+                   r.home_goals, r.away_goals, r.outcome,
+                   r.known_at AS result_known_at
             FROM match m
             LEFT JOIN ({self._preferred_results_sql()}) r ON r.match_id = m.match_id
             WHERE {' AND '.join(where)}
@@ -245,8 +247,47 @@ class Store:
         """
         return self.con.execute(sql, params).df()
 
-    def ratings_as_of(self, as_of: datetime, *, source: str = "clubelo") -> pd.DataFrame:
-        """Most recent rating per team that was published by `as_of`."""
+    def ratings_as_of(self, as_of: datetime, *, source: str | None = None,
+                      max_staleness_days: int = 21) -> pd.DataFrame:
+        """Most recent rating per team that was published by `as_of`.
+
+        With no `source`, a provider is chosen for the whole table rather than
+        per team. Ratings are not on a common scale -- ClubElo spans roughly
+        1300-2100 across Europe, a league-local walk starting everyone at 1500
+        spans far less -- so mixing them would give a column where a number
+        means something different from row to row, and the promoted-team prior
+        reads exactly that column.
+
+        Preference order decides, except that a provider whose newest rating is
+        more than `max_staleness_days` behind the freshest available is skipped.
+        That is what makes the fallback work: while ClubElo is up it wins, and
+        when it goes down its last snapshot ages out instead of being served
+        indefinitely as though it were current.
+        """
+        from bet.ratings import RATING_SOURCE_PREFERENCE
+
+        if source is not None:
+            return self._ratings_for_source(as_of, source)
+
+        newest = self.con.execute(
+            "SELECT source, MAX(valid_from) AS newest FROM team_rating "
+            "WHERE known_at <= ? GROUP BY source", [as_of]).df()
+        if newest.empty:
+            return pd.DataFrame(columns=["team_id", "rating", "valid_from"])
+
+        freshest = newest["newest"].max()
+        cutoff = pd.Timestamp(freshest) - pd.Timedelta(days=max_staleness_days)
+        current = {
+            row.source for row in newest.itertuples(index=False)
+            if pd.Timestamp(row.newest) >= cutoff
+        }
+
+        ranked = [s for s in RATING_SOURCE_PREFERENCE if s in current]
+        # A source nobody ranked is still better than no ratings at all.
+        ranked += sorted(current - set(RATING_SOURCE_PREFERENCE))
+        return self._ratings_for_source(as_of, ranked[0])
+
+    def _ratings_for_source(self, as_of: datetime, source: str) -> pd.DataFrame:
         sql = """
             SELECT team_id, rating, valid_from
             FROM (

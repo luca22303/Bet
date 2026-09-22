@@ -995,6 +995,17 @@ def data_provenance(store, as_of: datetime) -> dict:
     populated = [f for f in freshness if f["age_days"] is not None]
     worst = max((f["age_days"] for f in populated), default=None)
 
+    # How much the model actually has to learn from, which is not the same
+    # question as how fresh the newest row is: a store refreshed ten minutes
+    # ago can still hold one matchday and price nothing.
+    from bet.live import MIN_MATCHES_FOR_A_MODEL
+    try:
+        played = int(store.con.execute(
+            "SELECT count(*) FROM match m JOIN match_result r USING (match_id) "
+            "WHERE r.known_at <= ?", [as_of]).fetchone()[0])
+    except Exception:
+        played = 0
+
     return {
         "sources": sorted(names),
         "synthetic": synthetic,
@@ -1002,6 +1013,8 @@ def data_provenance(store, as_of: datetime) -> dict:
         "worst_age_days": worst,
         "stale": worst is not None and worst > STALE_AFTER_DAYS,
         "empty": not populated,
+        "played_matches": played,
+        "thin": bool(populated) and played < MIN_MATCHES_FOR_A_MODEL,
     }
 
 
@@ -1009,8 +1022,23 @@ def _provenance_banner(provenance: dict, as_of: datetime) -> str:
     """A visible statement of what this page is built from."""
     if provenance["empty"]:
         return ('<div class="provenance stale"><b>&#9888; No data</b>'
-                "The store is empty. Run <code>bet ingest --source all</code> "
-                "before reading anything here.</div>")
+                "The store is empty. Press <b>Refresh data</b>, or run "
+                "<code>bet ingest --source football_data --seasons 2015-2026</code>"
+                ".</div>")
+
+    if provenance.get("thin"):
+        # Fixtures without expectations, and nothing saying why, is the worst
+        # of both: the page looks broken when it is merely un-backfilled.
+        played = provenance.get("played_matches", 0)
+        return ('<div class="provenance stale"><b>&#9888; Not enough history '
+                "to price anything</b>"
+                f"The store holds {played} played match(es). The model fits an "
+                "attack and a defence for every club, which needs seasons, not "
+                "matchdays &mdash; so fixtures are listed below but every "
+                "expectation is blank. Press <b>Refresh data</b> to fetch the "
+                "back catalogue (about a minute), or run "
+                "<code>bet ingest --source football_data --seasons 2015-2026"
+                "</code>.</div>")
 
     rows = []
     for entry in provenance["freshness"]:

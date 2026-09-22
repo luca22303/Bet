@@ -279,3 +279,63 @@ def test_empty_store_still_renders(store):
     page = build(store, datetime(2024, 1, 1), days=7)
     assert "<!DOCTYPE html>" in page
     assert "No fixtures" in page or "no fixtures" in page.lower()
+
+
+def _thin_store(store, *, played):
+    """A store refreshed moments ago that still holds almost no history."""
+    import pandas as pd
+    from datetime import timedelta
+
+    store.init_schema()
+    now = datetime(2026, 9, 22)
+    matches, results = [], []
+    for i in range(played):
+        day = now - timedelta(days=played - i)
+        matches.append({"match_id": f"t{i}", "source": "fd", "league": "bundesliga",
+                        "season": "2026-27", "kickoff_utc": day,
+                        "home_team_id": "bayern_munich", "away_team_id": "rb_leipzig",
+                        "known_at": day - timedelta(days=30)})
+        results.append({"match_id": f"t{i}", "source": "fd", "home_goals": 2,
+                        "away_goals": 1, "outcome": "H", "ht_home": 1, "ht_away": 0,
+                        "known_at": day + timedelta(hours=2)})
+    store.upsert("match", pd.DataFrame(matches), ["match_id"])
+    store.upsert("match_result", pd.DataFrame(results), ["match_id", "source"])
+    return now
+
+
+def test_a_store_with_one_season_says_why_nothing_is_priced(store):
+    """Fixtures with no expectations and no explanation looks broken.
+
+    A refresh fetched only the season in progress, so the page rendered with
+    every expectation blank and nothing saying that a backfill was missing.
+    """
+    from bet.dashboard import build, data_provenance
+
+    now = _thin_store(store, played=36)
+    provenance = data_provenance(store, now)
+    assert provenance["thin"] is True
+    assert provenance["empty"] is False
+    assert provenance["played_matches"] == 36
+
+    page = build(store, now, days=8, league="bundesliga")
+    assert "Not enough history to price anything" in page
+    assert "36 played match(es)" in page
+    assert "2015-2026" in page          # the command that fixes it
+
+
+def test_a_stocked_store_shows_no_such_warning(store):
+    from bet.dashboard import build, data_provenance
+
+    now = _thin_store(store, played=700)
+    assert data_provenance(store, now)["thin"] is False
+    assert "Not enough history" not in build(store, now, days=8, league="bundesliga")
+
+
+def test_an_empty_store_points_at_the_button_not_only_a_command(store):
+    """'Run bet ingest --source all' was not a command this project has."""
+    from bet.dashboard import build
+
+    store.init_schema()
+    page = build(store, datetime(2026, 9, 22), days=8, league="bundesliga")
+    assert "Refresh data" in page
+    assert "--source all" not in page

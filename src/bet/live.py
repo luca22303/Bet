@@ -31,6 +31,29 @@ from pathlib import Path
 import pandas as pd
 
 
+# The first season to reach for when a store has no history. football-data.co.uk
+# carries results *and* closing odds from here, which is what the backtest is
+# scored against, and eleven CSVs is under a minute.
+BACKFILL_FROM = 2015
+
+# Below this many played matches a store cannot support a model: Dixon-Coles
+# estimates an attack and a defence for every club, and one season of a league
+# in progress is a few dozen matches against thirty-six free parameters. The
+# dashboard renders, and every expectation on it is blank.
+MIN_MATCHES_FOR_A_MODEL = 600
+
+
+def history_is_thin(store, league: str = "bundesliga") -> bool:
+    """Whether this store has enough played matches to fit anything."""
+    try:
+        count = store.con.execute(
+            "SELECT count(*) FROM match m JOIN match_result r USING (match_id) "
+            "WHERE m.league = ?", [league]).fetchone()[0]
+    except Exception:
+        return True
+    return int(count) < MIN_MATCHES_FOR_A_MODEL
+
+
 def current_season_start(today: date | None = None) -> int:
     """The season a date falls in, as its opening year.
 
@@ -54,12 +77,16 @@ class RefreshReport:
     # their server being down, and reporting it as "refresh failed" sent
     # someone looking for a bug in their own install.
     unavailable: dict[str, str] = field(default_factory=dict)
+    backfilled: bool = False
     output: Path | None = None
     duration_seconds: float = 0.0
 
     def summary(self) -> str:
-        lines = [f"refreshed {', '.join(str(s) for s in self.seasons)} "
-                 f"in {self.duration_seconds:.0f}s"]
+        what = "backfilled" if self.backfilled else "refreshed"
+        seasons = (f"{self.seasons[0]}-{self.seasons[-1]}"
+                   if len(self.seasons) > 2 else
+                   ", ".join(str(s) for s in self.seasons))
+        lines = [f"{what} {seasons} in {self.duration_seconds:.0f}s"]
         for source, status in self.sources.items():
             lines.append(f"  {source:<16} {status}")
         if self.rows:
@@ -96,8 +123,19 @@ def refresh(store, *, seasons: list[int] | None = None, league: str = "bundeslig
     exactly the stale snapshot this command exists to prevent.
     """
     started = time.monotonic()
-    seasons = seasons or [current_season_start()]
-    report = RefreshReport(started=datetime.utcnow(), seasons=seasons)
+
+    # A first run asked for the current season only, which is a few dozen
+    # matches -- enough to list fixtures and nowhere near enough to price them.
+    # Someone following the one-command path got a dashboard with every
+    # expectation blank and no indication why. So an empty store backfills
+    # itself rather than requiring a command the launcher never mentions.
+    backfilling = seasons is None and history_is_thin(store, league)
+    if seasons is None:
+        seasons = (list(range(BACKFILL_FROM, current_season_start() + 1))
+                   if backfilling else [current_season_start()])
+
+    report = RefreshReport(started=datetime.utcnow(), seasons=seasons,
+                           backfilled=backfilling)
 
     # A refresh behind a button takes minutes and gives no sign of life
     # otherwise, which reads exactly like a hang. `on_progress` is called with
@@ -106,8 +144,12 @@ def refresh(store, *, seasons: list[int] | None = None, league: str = "bundeslig
                                  "understat", "fbref") if name in sources]
 
     def announce(name: str) -> None:
-        if on_progress is not None:
-            on_progress(f"{name} ({planned.index(name) + 1} of {len(planned)})")
+        if on_progress is None:
+            return
+        where = f"{name} ({planned.index(name) + 1} of {len(planned)})"
+        if backfilling:
+            where += f" · first run, fetching {len(seasons)} seasons of history"
+        on_progress(where)
 
     store.init_schema()
 
@@ -151,6 +193,21 @@ def refresh(store, *, seasons: list[int] | None = None, league: str = "bundeslig
 
     if "news" in sources:
         report.sources["news"] = "team news (extraction needs Ollama)"
+
+    # Derived ratings, last, so they are computed from everything just
+    # ingested. This runs unconditionally rather than only when ClubElo failed:
+    # a fallback that is only built after the primary breaks is a fallback
+    # nobody has ever tested, and this one is a pass over a few thousand rows
+    # already on disk, so there is nothing to save by skipping it.
+    try:
+        from bet.ratings import derive_and_store
+
+        written = derive_and_store(store, league=league)
+        report.sources["derived_elo"] = "power ratings (computed from results)"
+        if written:
+            report.rows["team_rating"] = report.rows.get("team_rating", 0) + written
+    except Exception as exc:
+        report.errors.append(f"derived_elo: {exc}")
 
     report.duration_seconds = time.monotonic() - started
     return report

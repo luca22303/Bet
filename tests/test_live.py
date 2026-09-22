@@ -90,10 +90,126 @@ def test_refresh_defaults_to_the_current_season(store, monkeypatch):
     import bet.ingest.football_data as module
     monkeypatch.setattr(module, "FootballDataSource", _Source)
 
+    # A store that already holds history only re-fetches the current season:
+    # re-scraping a decade every run is slow and rude to the sources.
+    _seed_history(store, matches=700)
     refresh(store, sources=("football_data",))
     assert calls["seasons"] == [current_season_start()]
     # A cached copy of last week's file is the stale snapshot this prevents.
     assert calls["cache"] is False
+
+
+def _seed_history(store, *, matches):
+    """Enough played matches that the store no longer counts as empty."""
+    import pandas as pd
+    from datetime import timedelta
+
+    store.init_schema()
+    base = datetime(2020, 8, 1)
+    rows, results = [], []
+    for i in range(matches):
+        day = base + timedelta(days=i)
+        rows.append({"match_id": f"s{i}", "source": "fd", "league": "bundesliga",
+                     "season": "2020-21", "kickoff_utc": day,
+                     "home_team_id": "a", "away_team_id": "b",
+                     "known_at": day - timedelta(days=30)})
+        results.append({"match_id": f"s{i}", "source": "fd", "home_goals": 1,
+                        "away_goals": 0, "outcome": "H", "ht_home": 0,
+                        "ht_away": 0, "known_at": day + timedelta(hours=2)})
+    store.upsert("match", pd.DataFrame(rows), ["match_id"])
+    store.upsert("match_result", pd.DataFrame(results), ["match_id", "source"])
+
+
+def test_an_empty_store_backfills_rather_than_fetching_one_season(store, monkeypatch):
+    """The one-command path left people with a dashboard that cannot predict.
+
+    A season in progress is a few dozen matches against thirty-six free
+    parameters, so every expectation rendered blank and nothing said why. The
+    backfill command existed but the launcher never mentioned it.
+    """
+    from bet.ingest.base import IngestResult
+    from bet.live import BACKFILL_FROM, current_season_start, refresh
+
+    calls = {}
+
+    class _Source:
+        name = "football_data"
+
+        def __init__(self, store):
+            pass
+
+        def ingest(self, **kwargs):
+            calls.update(kwargs)
+            return IngestResult(source="football_data")
+
+    import bet.ingest.football_data as module
+    monkeypatch.setattr(module, "FootballDataSource", _Source)
+
+    store.init_schema()
+    report = refresh(store, sources=("football_data",))
+
+    assert report.backfilled is True
+    assert calls["seasons"][0] == BACKFILL_FROM
+    assert calls["seasons"][-1] == current_season_start()
+    assert len(calls["seasons"]) > 5
+
+
+def test_an_explicit_season_list_is_never_overridden(store):
+    """Asking for one season must fetch one season, empty store or not."""
+    from bet.live import refresh
+
+    store.init_schema()
+    report = refresh(store, seasons=[2024], sources=())
+    assert report.seasons == [2024]
+    assert report.backfilled is False
+
+
+def test_the_backfill_is_announced_so_a_long_first_run_makes_sense(store, monkeypatch):
+    """Eleven seasons takes a minute; silence for a minute reads as a hang."""
+    from bet.ingest.base import IngestResult
+    from bet.live import refresh
+
+    class _Source:
+        name = "football_data"
+
+        def __init__(self, store):
+            pass
+
+        def ingest(self, **kwargs):
+            return IngestResult(source="football_data")
+
+    import bet.ingest.football_data as module
+    monkeypatch.setattr(module, "FootballDataSource", _Source)
+
+    store.init_schema()
+    seen = []
+    refresh(store, sources=("football_data",), on_progress=seen.append)
+
+    assert seen and "first run" in seen[0]
+    assert "seasons of history" in seen[0]
+
+
+def test_a_stocked_store_does_not_announce_a_backfill(store, monkeypatch):
+    from bet.ingest.base import IngestResult
+    from bet.live import refresh
+
+    class _Source:
+        name = "football_data"
+
+        def __init__(self, store):
+            pass
+
+        def ingest(self, **kwargs):
+            return IngestResult(source="football_data")
+
+    import bet.ingest.football_data as module
+    monkeypatch.setattr(module, "FootballDataSource", _Source)
+
+    _seed_history(store, matches=700)
+    seen = []
+    refresh(store, sources=("football_data",), on_progress=seen.append)
+
+    assert seen and "first run" not in seen[0]
 
 
 def test_report_summary_names_what_happened():

@@ -70,27 +70,15 @@ class EloModel(Model):
         self.ratings: dict[str, float] = {}
 
     def fit(self, store, as_of: datetime) -> "EloModel":
-        history = store.matches_as_of(as_of)
-        self.ratings = {}
-        for row in history.itertuples(index=False):
-            home = self.ratings.setdefault(row.home_team_id, self.initial)
-            away = self.ratings.setdefault(row.away_team_id, self.initial)
+        # The walk itself lives in bet.ratings, which is also what writes the
+        # derived ratings into the store. Two copies of "our Elo" would drift
+        # apart and nobody would notice until a backtest disagreed with a
+        # dashboard.
+        from bet.ratings import final_elo
 
-            expected_home = 1.0 / (1.0 + 10 ** (-(home + self.home_advantage - away) / 400.0))
-            if row.home_goals > row.away_goals:
-                actual = 1.0
-            elif row.home_goals == row.away_goals:
-                actual = 0.5
-            else:
-                actual = 0.0
-
-            # Margin-of-victory multiplier: a 4-0 is more evidence than a 1-0.
-            margin = abs(int(row.home_goals) - int(row.away_goals))
-            multiplier = np.log1p(margin) + 1.0
-
-            delta = self.k * multiplier * (actual - expected_home)
-            self.ratings[row.home_team_id] = home + delta
-            self.ratings[row.away_team_id] = away - delta
+        self.ratings = final_elo(
+            store.matches_as_of(as_of), k=self.k,
+            home_advantage=self.home_advantage, initial=self.initial)
         return self
 
     def predict(self, store, fixtures: pd.DataFrame, as_of: datetime) -> Prediction:
