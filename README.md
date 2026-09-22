@@ -135,6 +135,7 @@ src/bet/
   live.py            one-command refresh: fetch, then rebuild
   diagnose.py        report what a scraped page actually contains
   server.py          the local web app: render on request, refresh on demand
+start.sh / start.bat  one-step launchers: find Python, install, run
   extract/           LLM extraction: Ollama (default) and Claude backends
   models/            Model contract, baselines, Dixon-Coles, promoted prior, props
   spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
@@ -485,8 +486,17 @@ Closing line value converges in weeks instead of years.
 ## Running it
 
 ```bash
-bet serve --refresh
+./start.sh --refresh      # macOS / Linux
+start.bat --refresh       # Windows, or double-click it
 ```
+
+The launcher finds a Python, builds a virtual environment, installs the project
+and starts the app. It never calls `pip` directly -- macOS ships only `pip3` and
+a Windows install often leaves `pip` unexported, so everything goes through
+`python -m pip`, which works wherever Python does. If Python is missing it names
+the command that installs it.
+
+Already set up? `bet serve --refresh` does the same thing.
 
 A local server at `http://127.0.0.1:8765` that renders the dashboard per
 request and carries a **Refresh data** button, so after the first run the
@@ -618,6 +628,6 @@ That's enough to correct the parser without seeing the site.
 make test
 ```
 
-387 tests, no network required. Synthetic seasons are generated from known team
+401 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.

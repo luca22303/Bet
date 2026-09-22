@@ -4,42 +4,47 @@ Every command below was run end to end. The only step that could not complete
 is the network fetch itself, because the environment this was built in blocks
 the data sources — which is exactly the step that will work on your machine.
 
-## 1. Install
+## 1. Start it
 
 ```bash
 git clone https://github.com/luca22303/Bet.git
 cd Bet
 git checkout claude/awesome-davinci-fesnx3
 
-python3 -m venv .venv && source .venv/bin/activate   # optional but tidy
-pip install -e .
+./start.sh --refresh          # macOS / Linux
+start.bat --refresh           # Windows (or just double-click start.bat)
 ```
 
-`bet` is now on your PATH. Check it:
+That is the whole install. The script finds a suitable Python, creates a virtual
+environment, installs everything into it, and opens
+`http://127.0.0.1:8765` in your browser. First run takes about a minute; after
+that it starts immediately.
 
-```bash
-bet --help
-```
+**You do not need `pip` on your PATH.** macOS often ships only `pip3`, and a
+Windows install frequently leaves `pip` unexported even when `python` works, so
+every install step here goes through `python -m pip` instead. If Python itself
+is missing, the script says which command installs it for your platform.
 
-## 2. Just run it
-
-```bash
-bet serve --refresh
-```
-
-That starts a local server, fetches the current season in the background, and
-opens `http://127.0.0.1:8765` in your browser. There is a **Refresh data**
-button on the page, so after the first run you never need the terminal again.
+There is a **Refresh data** button on the page, so after the first run you never
+need the terminal again.
 
 Leave it running and bookmark the URL. Everything below is the same thing done
 by hand, which is worth doing once for the backtest in step 4.
+
+To use the `bet` command directly, activate the environment the script made:
+
+```bash
+source .venv/bin/activate        # macOS / Linux
+.venv\Scripts\activate           # Windows
+bet --help
+```
 
 The server binds to loopback only. The refresh endpoint fetches from the
 internet and writes to the database with no authentication, which is fine for a
 tool on your own machine and is not fine on a shared network — don't change
 `--host` without putting an authenticating proxy in front of it.
 
-## 3. First backfill — one source only
+## 2. First backfill — one source only
 
 Start with football-data.co.uk alone. It is plain CSV, it is the source least
 likely to have changed under the parser, and it carries both results **and**
@@ -64,7 +69,7 @@ median closing overround around 4–7%.
 **If club names raise errors,** the message names the club. Send it to me and
 it is a one-line fix to `src/bet/teams.py`.
 
-## 4. The number that decides everything
+## 3. The number that decides everything
 
 ```bash
 bet backtest --from 2018-08-01
@@ -82,7 +87,7 @@ Nothing else in this project matters until you have looked at that table. It is
 also the first real test of whether the maths survives contact with actual
 Bundesliga results rather than the synthetic data it was developed against.
 
-## 5. The dashboard
+## 4. The dashboard
 
 `bet serve` from step 2 already gives you this at `http://127.0.0.1:8765`. For a
 file to mail someone or serve statically:
@@ -98,7 +103,7 @@ old, and a plain line means it is current.
 Click any fixture for the formations, both squads with their per-90 stats, and
 the likely scorelines.
 
-## 6. Add the richer sources
+## 5. Add the richer sources
 
 Once the above works, widen it. In this order, because it is also the order of
 how likely each is to need a fix:
@@ -123,7 +128,7 @@ bet diagnose --source fbref --url https://fbref.com/en/matches/<some-match-page>
 That prints what the page actually contains and saves the HTML. Send me the
 output and the fix is precise rather than a guess.
 
-## 7. Keep it current
+## 6. Keep it current
 
 If you leave `bet serve` running, press **Refresh data** on the page. For a
 file on a schedule, `bet live` does fetch-and-render in one step.
