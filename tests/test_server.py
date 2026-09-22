@@ -415,3 +415,57 @@ def test_status_reports_which_source_the_refresh_is_on(tmp_path, monkeypatch):
     # claiming to be on a source.
     assert status_payload(state)["progress"] == ""
     state.close()
+
+
+def test_an_unreachable_source_is_a_warning_not_a_failure(tmp_path, monkeypatch):
+    """ClubElo answering 502 on http and refusing https is their server down.
+
+    Reporting that as "refresh failed" sent someone looking for a bug in
+    their own install, when 1026 rows had just landed correctly.
+    """
+    import bet.live as live
+    from bet.live import RefreshReport
+
+    from bet.store import Store
+    db = tmp_path / "warn.duckdb"
+    with Store.open(db) as store:
+        store.init_schema()
+
+    monkeypatch.setattr(live, "refresh", lambda store, **kw: RefreshReport(
+        started=datetime.utcnow(), seasons=[2026], rows={"match": 1026},
+        errors=["clubelo: unavailable after 3 attempt(s) — power ratings not updated — 502"],
+        unavailable={"clubelo": "502 Bad Gateway"}))
+
+    state = ServerState(db_path=db)
+    state.begin_refresh()
+    run_refresh(state)
+
+    assert state.last_error == ""
+    assert "1026 rows written" in state.last_warning
+    assert "clubelo unavailable" in state.last_warning
+    assert "not your setup" in state.last_warning
+    assert status_payload(state)["last_warning"] == state.last_warning
+    state.close()
+
+
+def test_a_broken_source_is_still_a_failure(tmp_path, monkeypatch):
+    """Only an unreachable source is downgraded; a parse fault is not."""
+    import bet.live as live
+    from bet.live import RefreshReport
+
+    from bet.store import Store
+    db = tmp_path / "fail.duckdb"
+    with Store.open(db) as store:
+        store.init_schema()
+
+    monkeypatch.setattr(live, "refresh", lambda store, **kw: RefreshReport(
+        started=datetime.utcnow(), seasons=[2026], rows={"match": 1026},
+        errors=["fbref: no player table found on the page"]))
+
+    state = ServerState(db_path=db)
+    state.begin_refresh()
+    run_refresh(state)
+
+    assert state.last_warning == ""
+    assert "1 source error" in state.last_error
+    state.close()

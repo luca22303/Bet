@@ -178,6 +178,10 @@ footer { margin-top:38px; color:var(--muted); font-size:12px;
 .btn.secondary { background:none; color:var(--s1); }
 #refresh-status { color:var(--ink-2); }
 #refresh-status.err { color:var(--critical); }
+/* Not var(--warning): #fab219 is a badge fill, and as text on
+   white it falls well under 4.5:1. This is the same hue, dark
+   enough to read. */
+#refresh-status.warn { color:#8a5a00; }
 #refresh-status .errlist { margin:6px 0 0; padding-left:18px; font-size:12px; line-height:1.5; max-height:9em; overflow-y:auto; }
 #refresh-status .errlist li { margin:2px 0; word-break:break-word; }
 .spin { display:inline-block; width:11px; height:11px; margin-right:6px;
@@ -744,9 +748,17 @@ SERVED_SCRIPT = """
   var status = document.getElementById('refresh-status');
   if(!btn) return;
 
-  function say(text, isError){
+  function say(text, tone){
     status.innerHTML = text;
-    status.className = isError ? 'err' : '';
+    status.className = tone === true ? 'err' : (tone || '');
+  }
+
+  function detailList(list){
+    if(!list || !list.length) return '';
+    return '<ul class="errlist">' + list.map(function(e){
+      return '<li>' + String(e).replace(/[<&]/g, function(c){
+        return c === '<' ? '&lt;' : '&amp;'; }) + '</li>';
+    }).join('') + '</ul>';
   }
 
   // Poll while a fetch runs. The refresh happens on a worker thread server
@@ -763,18 +775,17 @@ SERVED_SCRIPT = """
         return;
       }
       btn.disabled = false;
+      if(!s.last_error && s.last_warning){
+        // An unreachable source is an outage to note, not a fault to fix.
+        // Red here had people looking for a bug in their own install.
+        say(s.last_warning + detailList(s.last_errors), 'warn');
+        reload.style.display = '';
+        return;
+      }
       if(s.last_error){
         // Every source failure, not only the first: they are usually
         // independent, and one at a time means one fix per round trip.
-        var detail = '';
-        var list = s.last_errors || [];
-        if(list.length){
-          detail = '<ul class="errlist">' + list.map(function(e){
-            return '<li>' + String(e).replace(/[<&]/g, function(c){
-              return c === '<' ? '&lt;' : '&amp;'; }) + '</li>';
-          }).join('') + '</ul>';
-        }
-        say('refresh failed: ' + s.last_error + detail, true);
+        say('refresh failed: ' + s.last_error + detailList(s.last_errors), true);
       } else {
         say('data refreshed &middot; reload to see it');
         reload.style.display = '';

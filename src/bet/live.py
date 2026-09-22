@@ -22,6 +22,7 @@ sources that owe you nothing.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -47,6 +48,12 @@ class RefreshReport:
     sources: dict[str, str] = field(default_factory=dict)
     rows: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    # Sources that produced nothing at all, mapped to why. Kept apart from
+    # `errors` because an unreachable source is an outage to note, not a fault
+    # to fix: ClubElo answering 502 on http and refusing https entirely is
+    # their server being down, and reporting it as "refresh failed" sent
+    # someone looking for a bug in their own install.
+    unavailable: dict[str, str] = field(default_factory=dict)
     output: Path | None = None
     duration_seconds: float = 0.0
 
@@ -58,16 +65,21 @@ class RefreshReport:
         if self.rows:
             written = ", ".join(f"{t}={n}" for t, n in sorted(self.rows.items()))
             lines.append(f"  wrote {written}")
-        if self.errors:
+        if self.unavailable:
+            for name, why in self.unavailable.items():
+                lines.append(f"  {name:<16} unavailable — {why}")
+        covered = tuple(f"{name}:" for name in self.unavailable)
+        remaining = [e for e in self.errors if not e.startswith(covered)]
+        if remaining:
             # Show them all. Truncating at five hid the sixth of six without
             # saying so, which is the failure mode this report exists to catch:
             # each source usually fails for its own reason, so a hidden one is
             # a fix that never gets made.
-            lines.append(f"  {len(self.errors)} error(s):")
-            shown = self.errors[:20]
+            lines.append(f"  {len(remaining)} error(s):")
+            shown = remaining[:20]
             lines.extend(f"    ! {e}" for e in shown)
-            if len(self.errors) > len(shown):
-                lines.append(f"    ... and {len(self.errors) - len(shown)} more")
+            if len(remaining) > len(shown):
+                lines.append(f"    ... and {len(remaining) - len(shown)} more")
         if self.output:
             lines.append(f"  dashboard -> {self.output}")
         return "\n".join(lines)
@@ -144,6 +156,44 @@ def refresh(store, *, seasons: list[int] | None = None, league: str = "bundeslig
     return report
 
 
+# What a network failure actually was, in the words a person needs. The raw
+# strings are nested urllib3 reprs several hundred characters long, and the one
+# fact worth reading -- the host refused, or never answered -- is buried in the
+# middle of them.
+_CAUSES = (
+    (r"(\d{3}) Server Error", lambda m: f"HTTP {m.group(1)}"),
+    (r"(\d{3}) Client Error", lambda m: f"HTTP {m.group(1)}"),
+    (r"ConnectTimeout|connect timeout", lambda m: "connection timed out"),
+    (r"ReadTimeout|Read timed out", lambda m: "no response"),
+    (r"Connection refused|NewConnectionError", lambda m: "connection refused"),
+    (r"Name or service not known|NameResolution", lambda m: "DNS lookup failed"),
+    (r"SSLError|CertificateError", lambda m: "TLS handshake failed"),
+)
+
+
+def _short_reason(errors: list[str], limit: int = 120) -> str:
+    """One readable line out of a source's failures.
+
+    Names the distinct causes rather than quoting the first exception: a host
+    that answers 502 over http and refuses https entirely has told you two
+    different things, and both matter when deciding whether it is their outage
+    or your network.
+    """
+    blob = " ".join(" ".join(errors).split())
+
+    found: list[str] = []
+    for pattern, render in _CAUSES:
+        match = re.search(pattern, blob)
+        if match:
+            described = render(match)
+            if described not in found:
+                found.append(described)
+
+    if found:
+        return ", ".join(found)
+    return blob if len(blob) <= limit else blob[: limit - 1] + "…"
+
+
 def _run(report: RefreshReport, source, **kwargs) -> None:
     """Run one adapter, folding its counts and errors into the report.
 
@@ -151,18 +201,36 @@ def _run(report: RefreshReport, source, **kwargs) -> None:
     stop the others: partial data plus a visible error beats no refresh at all,
     and the dashboard's provenance banner will show which feed went stale.
     """
+    feeds = report.sources.get(source.name, source.name)
+
     try:
         result = source.ingest(**kwargs)
     except Exception as exc:
         report.sources[source.name] = f"FAILED: {exc}"
+        report.unavailable[source.name] = _short_reason([str(exc)])
         report.errors.append(f"{source.name}: {exc}")
         return
 
     for table, count in result.rows_written.items():
         report.rows[table] = report.rows.get(table, 0) + count
+
+    if not result.errors:
+        return
+
+    written = sum(result.rows_written.values())
+    if written == 0:
+        # Nothing landed at all, so every error says the same thing. Collapse
+        # them, and name what is missing as a result rather than leaving the
+        # reader to work out what "clubelo" feeds.
+        report.sources[source.name] = f"unavailable ({feeds} not updated)"
+        report.unavailable[source.name] = _short_reason(result.errors)
+        report.errors.append(
+            f"{source.name}: unavailable after {len(result.errors)} "
+            f"attempt(s) — {feeds} not updated — {_short_reason(result.errors)}")
+        return
+
     report.errors.extend(f"{source.name}: {e}" for e in result.errors[:3])
-    if result.errors:
-        report.sources[source.name] += f" ({len(result.errors)} errors)"
+    report.sources[source.name] += f" ({len(result.errors)} errors)"
 
 
 def refresh_and_render(store, output: Path, *, days: int = 8,

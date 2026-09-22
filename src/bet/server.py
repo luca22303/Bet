@@ -46,6 +46,7 @@ class ServerState:
     last_error: str = ""
     last_errors: list[str] = field(default_factory=list)
     progress: str = ""
+    last_warning: str = ""
     lock: threading.Lock = field(default_factory=threading.Lock)
     _con: object | None = None
     _con_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -111,17 +112,19 @@ class ServerState:
             self.refreshing = True
             self.last_error = ""
             self.last_errors = []
+            self.last_warning = ""
             self.progress = "starting"
             return True
 
     def end_refresh(self, report: str = "", error: str = "",
-                    errors: list[str] | None = None) -> None:
+                    errors: list[str] | None = None, warning: str = "") -> None:
         with self.lock:
             self.refreshing = False
             self.last_refresh = datetime.utcnow()
             if report:
                 self.last_report = report
             self.last_error = error
+            self.last_warning = warning
             # Every source failure, not just the first. Six sources can fail
             # for six different reasons, and showing one of them means fixing
             # them one round-trip at a time.
@@ -161,6 +164,11 @@ def render_page(state: ServerState) -> str:
         return _render()
 
 
+def _failing_sources(report) -> list[str]:
+    """Which sources contributed an error, by the prefix `_run` writes."""
+    return [error.split(":", 1)[0] for error in report.errors]
+
+
 def run_refresh(state: ServerState) -> None:
     """Fetch from the sources. Runs on a worker thread."""
     from bet.live import refresh
@@ -187,6 +195,15 @@ def run_refresh(state: ServerState) -> None:
             state.end_refresh(
                 report=report.summary(), errors=report.errors,
                 error=f"nothing was fetched — {report.errors[0][:160]}")
+        elif report.errors and set(_failing_sources(report)) <= set(report.unavailable):
+            # Real data landed and the only failures are sources that could not
+            # be reached. That is an outage upstream, not a broken refresh, and
+            # calling it a failure sends someone hunting a bug in their install.
+            missing = ", ".join(report.unavailable)
+            state.end_refresh(
+                report=report.summary(), errors=report.errors,
+                warning=f"{rows} rows written · {missing} unavailable "
+                        f"(the source is down, not your setup)")
         elif report.errors:
             state.end_refresh(
                 report=report.summary(), errors=report.errors,
@@ -213,6 +230,7 @@ def status_payload(state: ServerState) -> dict:
         "last_report": state.last_report,
         "last_error": state.last_error,
         "last_errors": state.last_errors,
+        "last_warning": state.last_warning,
         "progress": state.progress,
     }
     try:

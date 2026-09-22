@@ -185,3 +185,118 @@ def test_progress_is_optional():
     from bet.live import refresh
 
     assert inspect.signature(refresh).parameters["on_progress"].default is None
+
+
+def _stub_source(name, *, rows=None, errors=()):
+    from bet.ingest.base import IngestResult
+
+    class _Stub:
+        def __init__(self):
+            self.name = name
+
+        def ingest(self, **kwargs):
+            return IngestResult(source=name, rows_written=dict(rows or {}),
+                                errors=list(errors))
+
+    return _Stub
+
+
+def _refresh_with(store, monkeypatch, stubs):
+    import bet.ingest.clubelo as ce
+    import bet.ingest.football_data as fd
+    import bet.ingest.openligadb as olg
+    from bet.live import refresh
+
+    monkeypatch.setattr(fd, "FootballDataSource", lambda store: stubs["football_data"]())
+    monkeypatch.setattr(olg, "OpenLigaDBSource", lambda store: stubs["openligadb"]())
+    monkeypatch.setattr(ce, "ClubEloSource", lambda store: stubs["clubelo"]())
+    store.init_schema()
+    return refresh(store, seasons=[2026],
+                   sources=("football_data", "openligadb", "clubelo"))
+
+
+def test_a_source_that_fetched_nothing_is_reported_once_with_its_consequence(
+        store, monkeypatch):
+    """Three snapshots of a down host produced three 900-character errors.
+
+    Repeating nested urllib3 detail buries the one fact worth reading, and
+    "clubelo" alone does not tell anyone what they are now missing.
+    """
+    report = _refresh_with(store, monkeypatch, {
+        "football_data": _stub_source("football_data", rows={"match": 1026}),
+        "openligadb": _stub_source("openligadb", rows={"match": 306}),
+        "clubelo": _stub_source("clubelo", errors=[
+            "clubelo 2026-09-01: no scheme answered — " + "x" * 600,
+            "clubelo 2026-09-08: no scheme answered — " + "x" * 600,
+            "clubelo 2026-09-15: no scheme answered — " + "x" * 600,
+        ]),
+    })
+
+    assert list(report.unavailable) == ["clubelo"]
+    clubelo_errors = [e for e in report.errors if e.startswith("clubelo")]
+    assert len(clubelo_errors) == 1
+    assert "power ratings not updated" in clubelo_errors[0]
+    assert len(clubelo_errors[0]) < 320, "the whole urllib3 chain came through"
+
+
+def test_a_source_that_wrote_some_rows_is_not_called_unavailable(store, monkeypatch):
+    """Partial success is a real error worth reading in full."""
+    report = _refresh_with(store, monkeypatch, {
+        "football_data": _stub_source("football_data", rows={"match": 306},
+                                      errors=["2019 season: 404"]),
+        "openligadb": _stub_source("openligadb", rows={"match": 306}),
+        "clubelo": _stub_source("clubelo", rows={"team_rating": 18}),
+    })
+
+    assert report.unavailable == {}
+    assert any("2019 season" in e for e in report.errors)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("502 Server Error: Bad Gateway for url: http://x", "HTTP 502"),
+    ("404 Client Error: Not Found", "HTTP 404"),
+    ("ConnectTimeoutError('Connection to x timed out. (connect timeout=10)')",
+     "connection timed out"),
+    ("NewConnectionError: [Errno 111] Connection refused", "connection refused"),
+    ("Failed to resolve 'x' ([Errno -2] Name or service not known)", "DNS lookup failed"),
+])
+def test_causes_are_named_not_quoted(raw, expected):
+    from bet.live import _short_reason
+    assert _short_reason([raw]) == expected
+
+
+def test_both_causes_are_named_when_a_host_fails_two_ways():
+    """http answering 502 while https refuses are two different facts.
+
+    Both matter when deciding whether it is their outage or your network.
+    """
+    from bet.live import _short_reason
+
+    reason = _short_reason([
+        "http -> 502 Server Error: Bad Gateway for url: http://api.clubelo.com/2026-09-01",
+        "https -> ConnectTimeoutError('Connection to api.clubelo.com timed out. "
+        "(connect timeout=10)')",
+    ])
+    assert reason == "HTTP 502, connection timed out"
+    assert len(reason) < 60
+
+
+def test_an_unrecognised_failure_still_says_something():
+    from bet.live import _short_reason
+    assert _short_reason(["the parser found no table"]) == "the parser found no table"
+
+
+def test_the_summary_does_not_print_an_outage_twice():
+    from datetime import datetime as _dt
+
+    from bet.live import RefreshReport
+
+    report = RefreshReport(
+        started=_dt.utcnow(), seasons=[2026], rows={"match": 306},
+        sources={"clubelo": "unavailable (power ratings not updated)"},
+        errors=["clubelo: unavailable after 3 attempt(s) — HTTP 502"],
+        unavailable={"clubelo": "HTTP 502, connection timed out"})
+
+    text = report.summary()
+    assert text.count("unavailable") == 2        # the source line and its reason
+    assert "error(s):" not in text               # already covered above
