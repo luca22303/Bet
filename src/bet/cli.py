@@ -517,7 +517,8 @@ def cmd_dashboard(args) -> int:
     as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.utcnow()
     with Store.open(args.db, read_only=True) as store:
         page = build(store, as_of, days=args.days, league=args.league,
-                     include_quality=not args.no_quality)
+                     include_quality=not args.no_quality,
+                     backtest_from=args.backtest_from)
 
     out = Path(args.out)
     out.write_text(page, encoding="utf-8")
@@ -681,6 +682,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_dash.add_argument("--days", type=int, default=8)
     p_dash.add_argument("--league", default="bundesliga")
     p_dash.add_argument("--no-quality", action="store_true")
+    p_dash.add_argument("--backtest-from", dest="backtest_from", default=None,
+                        help="run a walk-forward from this date to fill the "
+                             "model-health tab (slow)")
     p_dash.set_defaults(func=cmd_dashboard)
 
     p_status = sub.add_parser("status", help="row counts and integrity check")

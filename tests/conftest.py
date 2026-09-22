@@ -32,18 +32,47 @@ TRUE_DEFENCE = {team: -0.35 + 0.045 * i for i, team in enumerate(TEAMS)}
 TRUE_HOME_ADVANTAGE = 0.26
 
 
+def round_robin(teams: list[str]) -> list[list[tuple[str, str]]]:
+    """A double round robin where every team plays exactly once per matchday.
+
+    The circle method: fix one team and rotate the rest, which yields n-1
+    matchdays covering every pairing once, then mirror it with home and away
+    swapped for the return fixtures.
+
+    Shuffling pairings into fixed-size rounds instead -- the obvious shortcut --
+    lets a team appear twice on one matchday and not at all for a month. Nothing
+    downstream survives that: "days since last start" becomes meaningless,
+    rotation looks like squad turnover, and every player in a line-up reads as
+    six weeks stale.
+    """
+    rotation = list(teams)
+    if len(rotation) % 2:
+        rotation.append(None)          # bye, for an odd league size
+
+    half = len(rotation) // 2
+    first_leg = []
+    for matchday in range(len(rotation) - 1):
+        pairs = []
+        for i in range(half):
+            home, away = rotation[i], rotation[-(i + 1)]
+            if home is None or away is None:
+                continue
+            # Alternate which side is at home so no team is always the host.
+            pairs.append((home, away) if (matchday + i) % 2 == 0 else (away, home))
+        first_leg.append(pairs)
+        rotation = [rotation[0]] + [rotation[-1]] + rotation[1:-1]
+
+    return first_leg + [[(a, h) for h, a in pairs] for pairs in first_leg]
+
+
 def generate_season(start: datetime, season: str, rng: np.random.Generator,
                     league: str = "bundesliga") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Double round robin with Poisson goals drawn from the true strengths."""
+    """A full season with Poisson goals drawn from the true strengths."""
     matches, results, quotes = [], [], []
     kickoff = start
 
-    pairings = [(h, a) for h in TEAMS for a in TEAMS if h != a]
-    rng.shuffle(pairings)
-
-    for round_index in range(0, len(pairings), 9):
-        block = pairings[round_index:round_index + 9]
-        for home, away in block:
+    for matchday in round_robin(TEAMS):
+        for home, away in matchday:
             lam = np.exp(TRUE_ATTACK[home] + TRUE_DEFENCE[away] + TRUE_HOME_ADVANTAGE)
             mu = np.exp(TRUE_ATTACK[away] + TRUE_DEFENCE[home])
             home_goals, away_goals = int(rng.poisson(lam)), int(rng.poisson(mu))
@@ -51,8 +80,9 @@ def generate_season(start: datetime, season: str, rng: np.random.Generator,
             match_id = f"{league}:{season}:{home}:{away}"
 
             matches.append({
-                "match_id": match_id, "source": "synthetic", "league": league, "season": season,
-                "kickoff_utc": kickoff, "home_team_id": home, "away_team_id": away,
+                "match_id": match_id, "source": "synthetic", "league": league,
+                "season": season, "kickoff_utc": kickoff,
+                "home_team_id": home, "away_team_id": away,
                 "known_at": kickoff - timedelta(days=30),
             })
             results.append({
@@ -185,6 +215,34 @@ SQUAD_TEMPLATE = [
 ]
 
 
+# Plausible surnames, so anything that renders a player reads like a team sheet
+# rather than a debug dump. Chosen deterministically from the id, so a given
+# player keeps the same name across seasons and runs.
+_SURNAMES = [
+    "Baumann", "Becker", "Brandt", "Demirovic", "Engels", "Fischer", "Gosens",
+    "Grifo", "Hartmann", "Hofmann", "Jakobs", "Kehrer", "Klostermann", "Koch",
+    "Kramer", "Lienhart", "Maier", "Neuhaus", "Pavlovic", "Raum", "Reus",
+    "Sabitzer", "Schlotterbeck", "Stach", "Tillman", "Undav", "Vogt", "Wirtz",
+    "Wolf", "Zimmermann",
+]
+
+
+_SQUAD_SLOTS = {entry[0]: i for i, entry in enumerate(SQUAD_TEMPLATE)}
+
+
+def _synthetic_name(team_id: str, suffix: str) -> str:
+    """A surname that is unique within its own squad.
+
+    Uniqueness is not cosmetic. Name resolution deliberately refuses an
+    ambiguous match -- two players a source could equally mean -- so a squad
+    with two Brandts makes every lookup against it fail, and the fixture would
+    be testing the guard rather than the pipeline.
+    """
+    offset = sum(ord(c) for c in team_id)
+    slot = _SQUAD_SLOTS.get(suffix, 0)
+    return _SURNAMES[(offset + slot) % len(_SURNAMES)]
+
+
 def _choose_starting_xi(rng: np.random.Generator) -> set[str]:
     """Eleven starters, one keeper, sampled by each player's start propensity.
 
@@ -226,7 +284,7 @@ def generate_player_stats(matches: pd.DataFrame, rng: np.random.Generator,
 
             for suffix, position, shot_rate, assist_rate, defence_rate, start_prob in SQUAD_TEMPLATE:
                 player_id = f"{team_id}_{suffix}"
-                full_name = f"{suffix.upper()} {team_id.replace('_', ' ').title()}"
+                full_name = _synthetic_name(team_id, suffix)
                 if player_id not in seen:
                     seen[player_id] = full_name
                     players.append({

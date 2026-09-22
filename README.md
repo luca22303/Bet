@@ -127,7 +127,8 @@ src/bet/
   lineups.py         start propensity, formation, predicted XI
   matchday.py        T-60 confirmed-line-up check and repricing
   recommend.py       the matchday brief
-  dashboard.py       static HTML overview
+  dashboard.py       the static HTML dashboard
+  viz.py             inline SVG primitives: pitch, bars, lines, scatter
   extract/           LLM extraction: Ollama (default) and Claude backends
   models/            Model contract, baselines, Dixon-Coles, promoted prior, props
   spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
@@ -243,16 +244,55 @@ will.
 
 ## The dashboard
 
-`bet dashboard` writes a single self-contained HTML file — no server, nothing to
-deploy, openable from disk or mailed to someone. It shows fixtures with model
-probabilities, expected goals, fair odds, market prices and value bets; the
-predicted or confirmed XI for each side with its formation; who is out; the top
-player props; data coverage; and any quality warnings.
+`bet dashboard --out board.html` writes one self-contained HTML file — no server,
+no build step, no network. Four tabs: overview, fixtures, model health, props.
+
+**Click any fixture** and it opens into the detail: both formations drawn on a
+pitch, each side's eleven with start propensity and per-90 stats, the bench,
+who's unavailable, and the ranked scorelines.
+
+**Expected scores are shown only when the model can actually call one.**
+Football scorelines are flat — in an even match 0-0, 1-1 and 1-0 often sit within
+a point of each other — so a score appears only if it's genuinely the mode
+(≥9%) *and* clearly ahead of the runner-up (≥20% margin). Otherwise the slot is
+blank, with the reason on hover. On a typical matchday most fixtures are blank.
+That is the honest output, not a gap.
+
+**It tells you where its numbers came from.** A banner at the top names the
+sources and the age of each feed. If every source is a test fixture it says so
+in red — *synthetic data, not a real forecast* — because a dashboard built from
+fixtures looks exactly like one built from Bundesliga results, and that
+resemblance is how a demo gets read as a prediction. If the newest row is more
+than 8 days old it says that too.
+
+**Player tables carry a `last` column** — days since that player actually
+started, amber past 28 days. A per-90 rate carries no date, so without it a
+striker who stopped playing in September sits in the table looking identical to
+one who played on Saturday.
+
+Encoding notes, since they're decisions rather than defaults:
+
+- **1X2 is diverging, not categorical.** Home and away are opposite outcomes, so
+  they take the diverging poles (blue ↔ red) with the draw on the neutral grey
+  midpoint. Three arbitrary hues would imply the outcomes are unordered
+  identities; they aren't.
+- **A dashed ring** on a pitch marks a player the model is under 55% sure will
+  start. Confirmed XIs are solid.
+- **One hue per series.** The scoreline chart doesn't shade bars by value — that
+  would burn the only free channel restating the length the bar already shows.
+- Palette is the validated reference set, checked with a validator rather than
+  by eye (categorical trio passes all-pairs; the home/away poles clear CVD
+  separation at ΔE 21.6). Light mode throughout.
+
+`--backtest-from 2019-08-01` fills the model-health tab with a calibration curve
+and the RPS ranking against baselines. It's slow, so it's off by default — and
+until you run it, that tab tells you plainly that nothing else in the dashboard
+has been shown to be any good.
 
 It deliberately shows what the system *doesn't* know alongside what it does —
-whether an XI is confirmed or guessed, how much evidence sits behind a prop,
-whether market prices existed to compare against. A dashboard that only shows
-conclusions invites more confidence than the numbers deserve.
+whether an XI is confirmed or guessed and with what confidence, how much evidence
+sits behind a prop (`90s`), whether market prices existed to compare against. A
+dashboard of conclusions alone invites more confidence than the numbers deserve.
 
 ## Predicted line-ups
 
@@ -436,12 +476,24 @@ Closing line value converges in weeks instead of years.
 - Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
+## A warning about the example
+
+`dashboard-example.html` in this repo is generated from the **synthetic test
+fixtures**, not Bundesliga data. The player names come from a hardcoded surname
+pool; the stats are Poisson draws. The page says so in red at the top.
+
+Nothing in this project has yet been run against real data, because every source
+(football-data.co.uk, FBref, Understat, ClubElo, OpenLigaDB) is unreachable from
+the environment it was built in. The adapters are written and unit-tested
+against fixture-shaped payloads; the first real `bet ingest` is still the moment
+of truth.
+
 ## Testing
 
 ```bash
 make test
 ```
 
-297 tests, no network required. Synthetic seasons are generated from known team
+326 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.
