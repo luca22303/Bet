@@ -234,3 +234,59 @@ def test_upserting_on_part_of_the_key_is_refused_with_a_clear_message(store):
     }])
     with pytest.raises(ValueError, match="not a unique constraint"):
         store.upsert("match_result", frame, ["match_id"])
+
+
+# -------------------------------------------------- secondary index removal
+
+OLD_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_match_kickoff ON match (kickoff_utc);"
+    "CREATE INDEX IF NOT EXISTS idx_odds_match ON odds_quote (match_id, market);"
+)
+
+
+def _index_names(store):
+    return {row[0] for row in store.con.execute(
+        "SELECT index_name FROM duckdb_indexes()").fetchall()}
+
+
+def test_the_schema_creates_no_secondary_indexes(store):
+    """They cost write throughput, returned no read speed, and a failed delete
+    from one invalidates the whole database."""
+    store.init_schema()
+    from bet.store.schema import DROPPED_INDEXES
+
+    assert _index_names(store).isdisjoint(DROPPED_INDEXES)
+
+
+def test_init_schema_removes_indexes_an_older_version_created(tmp_path):
+    """Existing stores carry them, including one in the state that failed."""
+    from bet.store import Store
+
+    db = tmp_path / "legacy.duckdb"
+    with Store.open(db) as legacy:
+        legacy.init_schema()
+        legacy.con.execute(OLD_INDEX_DDL)          # as an older version left it
+        assert "idx_match_kickoff" in _index_names(legacy)
+
+    with Store.open(db) as upgraded:
+        upgraded.init_schema()
+        assert "idx_match_kickoff" not in _index_names(upgraded)
+        assert "idx_odds_match" not in _index_names(upgraded)
+
+
+def test_upserting_over_a_legacy_index_still_works(tmp_path):
+    """The repair has to happen before the write that would hit the index."""
+    from bet.store import Store
+
+    db = tmp_path / "legacy2.duckdb"
+    played = [f"bundesliga:2026-27:t{i}:t{i + 1}" for i in range(36)]
+
+    with Store.open(db) as legacy:
+        legacy.init_schema()
+        legacy.con.execute(OLD_INDEX_DDL)
+        legacy.upsert("match", _match_rows(played), ["match_id"])
+
+    with Store.open(db) as upgraded:
+        upgraded.init_schema()
+        upgraded.upsert("match", _match_rows(played, home_team_id="z"), ["match_id"])
+        assert upgraded.con.execute("SELECT count(*) FROM match").fetchone()[0] == 36

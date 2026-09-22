@@ -11,7 +11,7 @@ import duckdb
 import pandas as pd
 
 from bet.config import SETTINGS
-from bet.store.schema import DDL, PIT_TABLES
+from bet.store.schema import DDL, MIGRATIONS, PIT_TABLES
 
 # Which source to believe when several report the same match. football-data.co.uk
 # is first because it is the longest-established and carries the odds the rest of
@@ -55,6 +55,10 @@ class Store:
 
     def init_schema(self) -> None:
         self.con.execute(DDL)
+        # Drops the secondary indexes earlier versions created. This repairs a
+        # store that already has one in a broken state, so it runs every time
+        # rather than once -- see schema.DROPPED_INDEXES.
+        self.con.execute(MIGRATIONS)
 
     # ----------------------------------------------------------- write paths
 

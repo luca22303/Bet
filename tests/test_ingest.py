@@ -241,3 +241,97 @@ def test_openligadb_reports_an_unknown_club_by_name(store):
     matches, _, result = _parse_oldb(store, [entry])
     assert matches == []
     assert "Nowhere" in result.errors[0]
+
+
+# ------------------------------------------------------------ fetch retries
+
+class _FakeResponse:
+    def __init__(self, status, text="body"):
+        self.status_code = status
+        self.text = text
+
+    def raise_for_status(self):
+        import requests
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} Server Error", response=self)
+
+
+class _FakeSession:
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.headers = {}
+        self.calls = []
+
+    def get(self, url, timeout=None):
+        self.calls.append(url)
+        status = self.statuses.pop(0)
+        if isinstance(status, Exception):
+            raise status
+        return _FakeResponse(status)
+
+
+def _source(store, tmp_path, session):
+    from bet.ingest.base import Source
+
+    class _Probe(Source):
+        name = "probe"
+
+        def ingest(self, **kwargs):
+            raise NotImplementedError
+
+    return _Probe(store, session=session, raw_dir=tmp_path, delay=0)
+
+
+def test_a_gateway_error_is_retried(store, tmp_path):
+    """ClubElo returned 502 for three snapshots and the source was written off."""
+    store.init_schema()
+    session = _FakeSession([502, 502, 200])
+    text, _ = _source(store, tmp_path, session).fetch(
+        "http://api.clubelo.com/2026-09-01", cache=False)
+
+    assert text == "body"
+    assert len(session.calls) == 3
+
+
+def test_a_not_found_is_not_retried(store, tmp_path):
+    """A 404 will still be a 404; repeating it only annoys a free service."""
+    import requests
+
+    store.init_schema()
+    session = _FakeSession([404, 200])
+    with pytest.raises(requests.HTTPError):
+        _source(store, tmp_path, session).fetch("http://example.invalid/x", cache=False)
+
+    assert len(session.calls) == 1
+
+
+def test_a_forbidden_is_not_retried(store, tmp_path):
+    import requests
+
+    store.init_schema()
+    session = _FakeSession([403, 200])
+    with pytest.raises(requests.HTTPError):
+        _source(store, tmp_path, session).fetch("http://example.invalid/x", cache=False)
+
+    assert len(session.calls) == 1
+
+
+def test_persistent_failure_reports_how_many_attempts_were_made(store, tmp_path):
+    store.init_schema()
+    session = _FakeSession([503, 503, 503])
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        _source(store, tmp_path, session).fetch("http://example.invalid/x", cache=False)
+
+    assert len(session.calls) == 3
+
+
+def test_a_connection_error_is_retried(store, tmp_path):
+    """A dropped connection has no status code and is worth another try."""
+    import requests
+
+    store.init_schema()
+    session = _FakeSession([requests.ConnectionError("reset by peer"), 200])
+    text, _ = _source(store, tmp_path, session).fetch("http://example.invalid/x", cache=False)
+
+    assert text == "body"
+    assert len(session.calls) == 2

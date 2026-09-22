@@ -59,7 +59,7 @@ class Source(ABC):
     # ------------------------------------------------------------ fetching
 
     def fetch(self, url: str, *, suffix: str = ".txt", cache: bool = True,
-              timeout: int = 45) -> tuple[str, Path]:
+              timeout: int = 45, attempts: int = 3) -> tuple[str, Path]:
         """Fetch a URL, archive the body, and return (text, path).
 
         With `cache=True` an already-archived URL is read from disk. Re-running
@@ -71,18 +71,53 @@ class Source(ABC):
         if cache and path.exists():
             return path.read_text(encoding="utf-8", errors="replace"), path
 
-        elapsed = time.monotonic() - self._last_request
-        if elapsed < self.delay:
-            time.sleep(self.delay - elapsed)
-
-        response = self.session.get(url, timeout=timeout)
-        self._last_request = time.monotonic()
-        response.raise_for_status()
-        text = response.text
+        text = self._get_with_retries(url, timeout=timeout, attempts=attempts)
 
         path.write_text(text, encoding="utf-8")
         self._record_document(doc_id, url, text, path)
         return text, path
+
+    # Statuses worth trying again. A 5xx or a 429 says the server could not
+    # answer right now; a 404 or a 403 says it will not, and repeating those
+    # just annoys a free service that owes us nothing.
+    RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+    def _get_with_retries(self, url: str, *, timeout: int, attempts: int) -> str:
+        """GET with a bounded retry on transient failures.
+
+        ClubElo returned 502 for three consecutive weekly snapshots and the
+        whole source was written off, when a gateway error is the textbook
+        case for trying again a moment later.
+        """
+        last: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            elapsed = time.monotonic() - self._last_request
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+
+            try:
+                response = self.session.get(url, timeout=timeout)
+                self._last_request = time.monotonic()
+                if response.status_code in self.RETRYABLE_STATUSES:
+                    response.raise_for_status()
+                    raise requests.HTTPError(                 # pragma: no cover
+                        f"{response.status_code} for url: {url}", response=response)
+                response.raise_for_status()
+                return response.text
+            except requests.RequestException as exc:
+                self._last_request = time.monotonic()
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status is not None and status not in self.RETRYABLE_STATUSES:
+                    raise
+                last = exc
+                if attempt < attempts:
+                    # 2s, 4s: long enough for a gateway blip, short enough that
+                    # a refresh of a dozen URLs does not become a coffee break.
+                    time.sleep(self.delay * (2 ** attempt))
+
+        raise RuntimeError(
+            f"{url}: still failing after {attempts} attempts — {last}") from last
 
     def _record_document(self, doc_id: str, url: str, text: str, path: Path) -> None:
         frame = pd.DataFrame([{

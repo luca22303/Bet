@@ -211,17 +211,39 @@ CREATE TABLE IF NOT EXISTS player_availability (
     PRIMARY KEY (player_id, source, known_at)
 );
 
-CREATE INDEX IF NOT EXISTS idx_tms_match ON team_match_stat (match_id);
-CREATE INDEX IF NOT EXISTS idx_pms_match ON player_match_stat (match_id);
-CREATE INDEX IF NOT EXISTS idx_pms_player ON player_match_stat (player_id, known_at);
-CREATE INDEX IF NOT EXISTS idx_lineup_match ON lineup (match_id);
-CREATE INDEX IF NOT EXISTS idx_avail_player ON player_availability (player_id, known_at);
-
-CREATE INDEX IF NOT EXISTS idx_match_kickoff ON match (kickoff_utc);
-CREATE INDEX IF NOT EXISTS idx_odds_match ON odds_quote (match_id, market);
-CREATE INDEX IF NOT EXISTS idx_shot_match ON shot (match_id);
-CREATE INDEX IF NOT EXISTS idx_rating_team ON team_rating (team_id, valid_from);
+-- There are deliberately no secondary indexes here. See DROPPED_INDEXES.
 """
+
+# Secondary indexes this schema used to create, dropped from any database that
+# still has them.
+#
+# They were where a refresh died: "Failed to delete all rows from index. Only
+# deleted 0 out of 36 rows", which invalidates the entire database rather than
+# failing the one statement. The failure names the `match` table's two indexed
+# columns, and `match (kickoff_utc)` is a *non-unique* index over a column where
+# a whole matchday shares one timestamp -- nine fixtures, one key. Updating a
+# row deletes its old version from every index, so an upsert touches them even
+# though it no longer issues a DELETE of its own.
+#
+# They also earned nothing. Measured over eleven seasons (3,366 matches, 74,052
+# player-match rows), every read this project makes is within noise of the same
+# query without them -- DuckDB is columnar and answers these by scanning with
+# zone maps -- while ingestion ran about 40% slower with them present. An index
+# that costs write throughput, returns no read speed, and can invalidate the
+# database is not a trade worth keeping.
+#
+# Primary keys stay: they are unique, so they do not hit the duplicate-key path,
+# and `INSERT ... ON CONFLICT` needs them to detect a collision at all.
+#
+# Dropping them also repairs a database already carrying a broken index, which
+# is why this runs on every `init_schema` rather than once.
+DROPPED_INDEXES = (
+    "idx_tms_match", "idx_pms_match", "idx_pms_player", "idx_lineup_match",
+    "idx_avail_player", "idx_match_kickoff", "idx_odds_match", "idx_shot_match",
+    "idx_rating_team",
+)
+
+MIGRATIONS = "\n".join(f"DROP INDEX IF EXISTS {name};" for name in DROPPED_INDEXES)
 
 # Tables that carry point-in-time facts, checked by the leakage guard.
 PIT_TABLES = ("match", "match_result", "odds_quote", "team_rating", "shot",
