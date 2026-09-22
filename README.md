@@ -130,6 +130,7 @@ src/bet/
   dashboard.py       the static HTML dashboard
   viz.py             inline SVG primitives: pitch, bars, lines, scatter
   live.py            one-command refresh: fetch, then rebuild
+  diagnose.py        report what a scraped page actually contains
   extract/           LLM extraction: Ollama (default) and Claude backends
   models/            Model contract, baselines, Dixon-Coles, promoted prior, props
   spatial/           shot maps, heatmaps, field tilt (dashboard, not features)
@@ -539,8 +540,46 @@ Expected risk on first contact, lowest to highest:
 | ClubElo | low | plain CSV API |
 | OpenLigaDB | low | documented JSON API |
 | Understat | medium | JSON embedded in a `<script>`; breaks if they restyle |
-| FBref | **high** | commented-out tables and two-level headers, never seen live |
-| kicker | **unverified** | written blind; assume it needs fixing |
+| FBref | medium | parses on content, not ids — see below |
+| kicker | medium | three fallback strategies — see below |
+
+### What was done about the two risky ones
+
+Both originally keyed off exact markup that was invented, not observed. They now
+identify content instead:
+
+**FBref** picks player tables by what's *in* them — a player column plus a
+recognisable stat — rather than by `id="stats_<hash>_summary"`. Team names have
+four independent routes (og:title, `<title>`, `<h1>`, squad links) and kickoff
+three. Tested against three markups: current, a hypothetical id redesign, and no
+ids at all. All three parse identically.
+
+**kicker** tries embedded JSON (`__NEXT_DATA__`, `__NUXT__`, ld+json) first,
+then class-attribute markup matched loosely enough to survive hashed class
+names, then a generic scan for formation strings near name-like text. The
+strategy that worked is reported, so a page that starts parsing differently is
+visible rather than silent. A formation is only accepted if its digits sum to
+ten outfield players — that's what stops "2-1" being read as a shape.
+
+Two real bugs fell out of doing this. `pandas.read_html` needs `lxml`, which
+was never declared as a dependency — and the code caught `ImportError` alongside
+a malformed-table `ValueError`, so on any machine without it the FBref ingest
+would have returned **zero players and no error**. And FBref closes each table
+with a totals row ("12 Players") that parses as an ordinary player, which would
+have added a phantom squad member carrying the team's summed minutes to every
+side.
+
+### When a parser does break
+
+```bash
+bet diagnose --source fbref --url https://fbref.com/en/matches/...
+bet diagnose --source kicker --file saved-page.html    # offline, after saving
+```
+
+It runs each parser step separately and reports what the page actually contains
+— the real `<title>`, the table ids present, the column names found and missed,
+the class names on the page, the digit runs it rejected — and saves the HTML.
+That's enough to correct the parser without seeing the site.
 
 ## Testing
 
@@ -548,6 +587,6 @@ Expected risk on first contact, lowest to highest:
 make test
 ```
 
-336 tests, no network required. Synthetic seasons are generated from known team
+374 tests, no network required. Synthetic seasons are generated from known team
 strengths, so models are checked for recovering the truth rather than merely for
 running without raising.

@@ -15,6 +15,7 @@
     bet watch                       T-60 line-up check and repricing
     bet dashboard --out board.html  static HTML overview
     bet live --out board.html       fetch live data, then rebuild the dashboard
+    bet diagnose --source fbref     report what a scraped page actually contains
     bet status                      row counts and the leakage check
     bet check                       point-in-time integrity only
 """
@@ -584,6 +585,36 @@ def cmd_live(args) -> int:
             return 0
 
 
+def cmd_diagnose(args) -> int:
+    """Fetch one page and report what each parser step made of it."""
+    from bet.diagnose import diagnose_fbref, diagnose_kicker, Diagnosis, run
+
+    if args.file:
+        # Offline mode: check a saved page, so a fix can be iterated on without
+        # re-fetching and without depending on the site being reachable.
+        text = Path(args.file).read_text(encoding="utf-8", errors="replace")
+        checkers = {"fbref": diagnose_fbref, "kicker": diagnose_kicker}
+        if args.source not in checkers:
+            print(f"no diagnostics for {args.source!r}")
+            return 1
+        diagnosis = Diagnosis(source=args.source, url=args.file, fetched=True,
+                              html_bytes=len(text))
+        diagnosis.findings.extend(checkers[args.source](text))
+        print(diagnosis.report())
+        return 0 if diagnosis.ok else 1
+
+    if not args.url:
+        print("give either --url to fetch a page or --file to check a saved one")
+        return 2
+
+    with Store.open(args.db) as store:
+        store.init_schema()
+        diagnosis = run(args.source, args.url, store,
+                        save_dir=Path(args.save_dir) if args.save_dir else None)
+        print(diagnosis.report())
+        return 0 if diagnosis.ok else 1
+
+
 def _print_leakage(store) -> None:
     report = store.leakage_report()
     total = int(report["violations"].sum())
@@ -759,6 +790,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--every", type=int, default=None,
                         help="repeat every N seconds (min 60); prefer cron for unattended use")
     p_live.set_defaults(func=cmd_live)
+
+    p_diag = sub.add_parser("diagnose",
+                            help="report what a scraped page actually contains")
+    p_diag.add_argument("--source", required=True, choices=["fbref", "kicker"])
+    p_diag.add_argument("--url", default=None, help="page to fetch and check")
+    p_diag.add_argument("--file", default=None, help="saved page to check offline")
+    p_diag.add_argument("--save-dir", dest="save_dir", default=None,
+                        help="where to keep the fetched HTML")
+    p_diag.set_defaults(func=cmd_diagnose)
 
     p_status = sub.add_parser("status", help="row counts and integrity check")
     p_status.set_defaults(func=cmd_status)
