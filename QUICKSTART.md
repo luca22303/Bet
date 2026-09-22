@@ -6,14 +6,17 @@ the data sources — which is exactly the step that will work on your machine.
 
 ## 1. Start it
 
+On macOS or Linux:
+
 ```bash
 git clone https://github.com/luca22303/Bet.git
 cd Bet
 git checkout claude/awesome-davinci-fesnx3
-
-./start.sh --refresh          # macOS / Linux
-start.bat --refresh           # Windows (or just double-click start.bat)
+./start.sh --refresh
 ```
+
+On Windows, run the same three git commands, then `start.bat --refresh` — or
+just double-click `start.bat` in Explorer.
 
 That is the whole install. The script finds a suitable Python, creates a virtual
 environment, installs everything into it, and opens
@@ -34,10 +37,11 @@ by hand, which is worth doing once for the backtest in step 4.
 To use the `bet` command directly, activate the environment the script made:
 
 ```bash
-source .venv/bin/activate        # macOS / Linux
-.venv\Scripts\activate           # Windows
+source .venv/bin/activate
 bet --help
 ```
+
+On Windows the activate script is `.venv\Scripts\activate` instead.
 
 The server binds to loopback only. The refresh endpoint fetches from the
 internet and writes to the database with no authentication, which is fine for a
@@ -58,9 +62,13 @@ bet ingest --source football_data --seasons 2015-2026
 Expect a few minutes and roughly 11 files. Then check what landed:
 
 ```bash
-bet status      # row counts, and the point-in-time integrity check
-bet quality     # coverage per season, odds sanity, staleness
+bet status
+bet quality
 ```
+
+`bet status` gives row counts and the point-in-time integrity check; `bet
+quality` covers per-season coverage, odds sanity and staleness.
+
 
 **What good looks like:** `bet status` ends with *"OK: no facts are visible
 before they occurred"*, and `bet quality` shows ~306 matches per season with a
@@ -109,12 +117,17 @@ Once the above works, widen it. In this order, because it is also the order of
 how likely each is to need a fix:
 
 ```bash
-bet ingest --source clubelo                       # power ratings, promoted-team priors
-bet ingest --source openligadb --seasons 2015-2026  # fixtures, second source for results
-bet ingest --source understat --seasons 2015-2026   # shot-level xG
-bet ingest --source understat --seasons 2023-2026 --shots   # slow: ~306 requests/season
-bet ingest --source fbref --seasons 2023-2026       # player stats + line-ups, slowest
+bet ingest --source clubelo
+bet ingest --source openligadb --seasons 2015-2026
+bet ingest --source understat --seasons 2015-2026
+bet ingest --source understat --seasons 2023-2026 --shots
+bet ingest --source fbref --seasons 2023-2026
 ```
+
+In order: power ratings (which the promoted-team prior reads), fixtures plus a
+second source for results, shot-level xG, per-match shots (slow — about 306
+requests a season), and player stats with line-ups (slowest).
+
 
 With two independent sources for results, `bet quality` can cross-check them —
 two scrapes either agree on a scoreline or one of them is wrong.
@@ -153,14 +166,14 @@ where a small local model beats a paid API.
 ollama serve
 ollama pull qwen2.5:7b-instruct
 
-bet fetch-news          # pulls several feeds, extracts, verifies against squads
-bet brief               # the matchday brief in the terminal
+bet fetch-news
+bet brief
 ```
 
 ## Optional: line-ups an hour before kickoff
 
 ```bash
-bet watch               # finds fixtures ~60 min out, re-prices on the confirmed XI
+bet watch
 ```
 
 The useful output is the diff. A price that barely moves means the model had

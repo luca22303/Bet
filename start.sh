@@ -20,6 +20,27 @@ esac
 say() { printf '%s\n' "$*"; }
 fail() { printf '\n%s\n' "$*" >&2; exit 1; }
 
+# --------------------------------------------------------------- guard: paste
+
+# zsh does not treat `#` as a comment in an interactive shell unless
+# interactive_comments is set, and it is off by default -- which is every macOS
+# user since Catalina. A line copied as `./start.sh --refresh  # macOS` therefore
+# arrives here with the comment as arguments, and the failure surfaces much
+# later as an unrecognised-argument error from a command they did not type.
+for arg in "$@"; do
+    case "$arg" in
+        '#'*)
+            say ""
+            say "It looks like a trailing comment was pasted along with the command."
+            say "zsh passes '#' through as an argument rather than starting a comment."
+            say ""
+            say "Run just this, with nothing after it:"
+            say "  ./start.sh --refresh"
+            exit 2
+            ;;
+    esac
+done
+
 # ---------------------------------------------------------------- find python
 
 PYTHON=""

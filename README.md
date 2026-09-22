@@ -70,24 +70,21 @@ sequence from clone to dashboard, with what to expect at each step.
 
 ## Use
 
-```bash
-bet init                                  # create the schema
-bet ingest --source football_data --seasons 2010-2026
-bet ingest --source all --seasons 2015-2026
-bet check                                 # point-in-time integrity
-bet backtest --from 2018-08-01 --calibration
-bet tune --from 2018-08-01                # choose the decay rate empirically
-bet predict --days 10                     # price the next fixtures
-bet props --stat shots --days 7           # player prop prices
-bet scout --team bayern_munich            # shot profile and spatial summary
-bet news --file news.txt --team bayern_munich   # extract availability (local LLM)
-bet brief --days 8                        # the matchday recommendations
-bet quality                               # reconciliation and coverage checks
-bet lineup --team bayern_munich           # predicted XI, formation, rotation
-bet fetch-news                            # pull news from several feeds and extract
-bet watch                                 # T-60 line-up check and repricing
-bet dashboard --out board.html            # static HTML overview
-```
+| command | what it does |
+|---|---|
+| `bet init` | create the schema |
+| `bet check` | point-in-time integrity |
+| `bet tune --from 2018-08-01` | choose the decay rate empirically |
+| `bet predict --days 10` | price the next fixtures |
+| `bet props --stat shots --days 7` | player prop prices |
+| `bet scout --team bayern_munich` | shot profile and spatial summary |
+| `bet news --file news.txt --team bayern_munich` | extract availability (local LLM) |
+| `bet brief --days 8` | the matchday recommendations |
+| `bet quality` | reconciliation and coverage checks |
+| `bet lineup --team bayern_munich` | predicted XI, formation, rotation |
+| `bet fetch-news` | pull news from several feeds and extract |
+| `bet watch` | T-60 line-up check and repricing |
+| `bet dashboard --out board.html` | static HTML overview |
 
 Ingest `football_data` first — it carries results *and* historical closing odds
 from several books including Pinnacle, which is what makes closing-line-value
@@ -486,9 +483,10 @@ Closing line value converges in weeks instead of years.
 ## Running it
 
 ```bash
-./start.sh --refresh      # macOS / Linux
-start.bat --refresh       # Windows, or double-click it
+./start.sh --refresh
 ```
+
+On Windows: double-click `start.bat`, or run `start.bat --refresh`.
 
 The launcher finds a Python, builds a virtual environment, installs the project
 and starts the app. It never calls `pip` directly -- macOS ships only `pip3` and
@@ -614,7 +612,7 @@ side.
 
 ```bash
 bet diagnose --source fbref --url https://fbref.com/en/matches/...
-bet diagnose --source kicker --file saved-page.html    # offline, after saving
+bet diagnose --source kicker --file saved-page.html
 ```
 
 It runs each parser step separately and reports what the page actually contains
