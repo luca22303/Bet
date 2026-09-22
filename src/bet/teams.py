@@ -97,6 +97,27 @@ _TEAMS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
+# Legal forms and club-type prefixes, which carry no identity: every German
+# club has one and no two clubs are distinguished by it.
+_LEGAL_FORM_TOKENS = frozenset({
+    "fc", "sv", "vfl", "vfb", "sc", "tsg", "fsv", "dsc", "spvgg", "bv",
+    "tsv", "sg", "ssv", "msv", "kfc", "bsc", "1",
+    "04", "05", "07", "09", "96", "98", "1848", "1899",
+})
+
+# Abbreviations a source may write in place of the full word. Only unambiguous
+# ones belong here: "bor" is always Borussia, but "b" could be anything.
+_ABBREVIATIONS = {
+    "bor": "borussia",
+    "borr": "borussia",
+    "ein": "eintracht",
+    "eintr": "eintracht",
+    "wer": "werder",
+    "hann": "hannover",
+    "fortuna": "fortuna",
+}
+
+
 def _normalise(name: str) -> str:
     """Strip accents, punctuation and common corporate noise from a club name."""
     text = unicodedata.normalize("NFKD", name.strip().lower())
@@ -104,6 +125,9 @@ def _normalise(name: str) -> str:
     text = text.replace("ß", "ss").replace("&", " and ")
     text = re.sub(r"[.'`\-_/]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
+    # "Bor. Monchengladbach" and "Ein. Frankfurt" are how German listings
+    # abbreviate; expanding here means every alias is written out once.
+    text = " ".join(_ABBREVIATIONS.get(token, token) for token in text.split())
     return text
 
 
@@ -134,10 +158,25 @@ def resolve(name: str, *, strict: bool = True) -> str | None:
     stripped = " ".join(
         token
         for token in key.split()
-        if token not in {"fc", "sv", "vfl", "vfb", "sc", "tsg", "fsv", "dsc", "spvgg", "bv", "1", "04", "05", "98", "07", "96", "1899", "1848", "09"}
+        if token not in _LEGAL_FORM_TOKENS
     ).strip()
     if stripped and stripped in _LOOKUP:
         return _LOOKUP[stripped]
+
+    # Third pass: drop founding years as a class rather than one at a time.
+    # German clubs carry them ("1. FC Heidenheim 1846", "VfL Bochum 1848",
+    # "TSG 1899 Hoffenheim") and enumerating the years means the registry
+    # breaks whenever a club with an unlisted year is promoted -- 1846 was
+    # missing, so OpenLigaDB's full name for Heidenheim did not resolve.
+    #
+    # This runs only after the pass above, so a year that genuinely identifies
+    # a club is still tried first: "TSV 1860 Munchen" resolves on its own alias
+    # before the year is ever discarded.
+    without_years = " ".join(
+        token for token in stripped.split() if not token.isdigit()
+    ).strip()
+    if without_years and without_years in _LOOKUP:
+        return _LOOKUP[without_years]
 
     if strict:
         raise UnknownTeamError(

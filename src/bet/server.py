@@ -44,6 +44,7 @@ class ServerState:
     last_refresh: datetime | None = None
     last_report: str = ""
     last_error: str = ""
+    last_errors: list[str] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
     _con: object | None = None
     _con_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -81,16 +82,21 @@ class ServerState:
                 return False
             self.refreshing = True
             self.last_error = ""
+            self.last_errors = []
             return True
 
-    def end_refresh(self, report: str = "", error: str = "") -> None:
+    def end_refresh(self, report: str = "", error: str = "",
+                    errors: list[str] | None = None) -> None:
         with self.lock:
             self.refreshing = False
             self.last_refresh = datetime.utcnow()
             if report:
                 self.last_report = report
-            if error:
-                self.last_error = error
+            self.last_error = error
+            # Every source failure, not just the first. Six sources can fail
+            # for six different reasons, and showing one of them means fixing
+            # them one round-trip at a time.
+            self.last_errors = list(errors or [])
 
 
 def _open_store(state: ServerState):
@@ -129,19 +135,20 @@ def run_refresh(state: ServerState) -> None:
         rows = sum(report.rows.values())
         if rows == 0 and report.errors:
             state.end_refresh(
-                report=report.summary(),
+                report=report.summary(), errors=report.errors,
                 error=f"nothing was fetched — {report.errors[0][:160]}")
         elif report.errors:
             state.end_refresh(
-                report=report.summary(),
+                report=report.summary(), errors=report.errors,
                 error=f"{rows} rows written, but {len(report.errors)} source "
-                      f"error(s) — {report.errors[0][:120]}")
+                      f"error(s)")
         else:
             state.end_refresh(report=report.summary())
     except Exception as exc:
         # A failed refresh must leave the server running and say what happened;
         # the page keeps serving whatever the store already held.
         state.end_refresh(error=f"{type(exc).__name__}: {exc}",
+                          errors=[traceback.format_exc(limit=3)],
                           report=traceback.format_exc(limit=3))
 
 
@@ -153,6 +160,7 @@ def status_payload(state: ServerState) -> dict:
         "last_refresh": state.last_refresh.isoformat() if state.last_refresh else None,
         "last_report": state.last_report,
         "last_error": state.last_error,
+        "last_errors": state.last_errors,
     }
     try:
         with _open_store(state) as store:

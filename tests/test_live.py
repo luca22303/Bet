@@ -118,3 +118,29 @@ def test_refresh_and_render_writes_a_page(store, tmp_path):
     page = output.read_text()
     assert "<!DOCTYPE html>" in page
     assert "No data" in page
+
+
+def test_the_summary_hides_no_errors():
+    """Truncation dropped the sixth of six failures without saying so."""
+    from datetime import datetime as _dt
+
+    from bet.live import RefreshReport
+
+    report = RefreshReport(started=_dt.utcnow(), seasons=[2026],
+                           errors=[f"source{i}: broke" for i in range(6)])
+    text = report.summary()
+    assert "6 error(s)" in text
+    for i in range(6):
+        assert f"source{i}" in text
+
+
+def test_a_very_long_error_list_says_how_many_are_hidden():
+    from datetime import datetime as _dt
+
+    from bet.live import RefreshReport
+
+    report = RefreshReport(started=_dt.utcnow(), seasons=[2026],
+                           errors=[f"e{i}" for i in range(25)])
+    text = report.summary()
+    assert "25 error(s)" in text
+    assert "and 5 more" in text

@@ -194,7 +194,11 @@ def test_partial_failures_are_reported_alongside_the_rows_written(tmp_path, monk
     run_refresh(state)
 
     assert "306 rows written" in state.last_error
-    assert "clubelo" in state.last_error
+    assert "1 source error" in state.last_error
+    # The headline counts them; the list names them. Six sources can fail for
+    # six different reasons, and reporting only the first means fixing them
+    # one round trip at a time.
+    assert state.last_errors == ["clubelo: 403"]
 
 
 def test_a_crashing_refresh_leaves_the_server_usable(tmp_path, monkeypatch):
@@ -261,3 +265,57 @@ def test_the_page_renders_while_a_refresh_holds_the_database(running, monkeypatc
     finally:
         release.set()
         worker.join(timeout=20)
+
+
+def test_every_source_error_is_reported_not_only_the_first(tmp_path, monkeypatch):
+    import bet.live as live
+    from bet.live import RefreshReport
+
+    failures = [f"source{i}: broke differently" for i in range(6)]
+
+    def _six_failures(store, **kwargs):
+        return RefreshReport(started=datetime.utcnow(), seasons=[2026],
+                             rows={"match": 684}, errors=list(failures))
+
+    monkeypatch.setattr(live, "refresh", _six_failures)
+
+    from bet.store import Store
+    db = tmp_path / "six.duckdb"
+    with Store.open(db) as store:
+        store.init_schema()
+
+    state = ServerState(db_path=db)
+    state.begin_refresh()
+    run_refresh(state)
+
+    assert state.last_errors == failures
+    assert status_payload(state)["last_errors"] == failures
+    state.close()
+
+
+def test_a_clean_refresh_clears_the_previous_errors(tmp_path, monkeypatch):
+    """A stale error list would report failures that no longer happen."""
+    import bet.live as live
+    from bet.live import RefreshReport
+
+    from bet.store import Store
+    db = tmp_path / "clearing.duckdb"
+    with Store.open(db) as store:
+        store.init_schema()
+
+    state = ServerState(db_path=db)
+
+    monkeypatch.setattr(live, "refresh", lambda store, **kw: RefreshReport(
+        started=datetime.utcnow(), seasons=[2026], rows={"match": 1},
+        errors=["openligadb: broke"]))
+    state.begin_refresh()
+    run_refresh(state)
+    assert state.last_errors
+
+    monkeypatch.setattr(live, "refresh", lambda store, **kw: RefreshReport(
+        started=datetime.utcnow(), seasons=[2026], rows={"match": 306}))
+    state.begin_refresh()
+    run_refresh(state)
+    assert state.last_errors == []
+    assert state.last_error == ""
+    state.close()

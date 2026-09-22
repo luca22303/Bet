@@ -178,6 +178,8 @@ footer { margin-top:38px; color:var(--muted); font-size:12px;
 .btn.secondary { background:none; color:var(--s1); }
 #refresh-status { color:var(--ink-2); }
 #refresh-status.err { color:var(--critical); }
+#refresh-status .errlist { margin:6px 0 0; padding-left:18px; font-size:12px; line-height:1.5; max-height:9em; overflow-y:auto; }
+#refresh-status .errlist li { margin:2px 0; word-break:break-word; }
 .spin { display:inline-block; width:11px; height:11px; margin-right:6px;
   border:2px solid var(--border); border-top-color:var(--s1); border-radius:50%;
   animation:spin .8s linear infinite; vertical-align:-1px; }
@@ -759,7 +761,17 @@ SERVED_SCRIPT = """
       }
       btn.disabled = false;
       if(s.last_error){
-        say('refresh failed: ' + s.last_error, true);
+        // Every source failure, not only the first: they are usually
+        // independent, and one at a time means one fix per round trip.
+        var detail = '';
+        var list = s.last_errors || [];
+        if(list.length){
+          detail = '<ul class="errlist">' + list.map(function(e){
+            return '<li>' + String(e).replace(/[<&]/g, function(c){
+              return c === '<' ? '&lt;' : '&amp;'; }) + '</li>';
+          }).join('') + '</ul>';
+        }
+        say('refresh failed: ' + s.last_error + detail, true);
       } else {
         say('data refreshed &middot; reload to see it');
         reload.style.display = '';

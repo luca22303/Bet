@@ -59,8 +59,15 @@ class RefreshReport:
             written = ", ".join(f"{t}={n}" for t, n in sorted(self.rows.items()))
             lines.append(f"  wrote {written}")
         if self.errors:
+            # Show them all. Truncating at five hid the sixth of six without
+            # saying so, which is the failure mode this report exists to catch:
+            # each source usually fails for its own reason, so a hidden one is
+            # a fix that never gets made.
             lines.append(f"  {len(self.errors)} error(s):")
-            lines.extend(f"    ! {e}" for e in self.errors[:5])
+            shown = self.errors[:20]
+            lines.extend(f"    ! {e}" for e in shown)
+            if len(self.errors) > len(shown):
+                lines.append(f"    ... and {len(self.errors) - len(shown)} more")
         if self.output:
             lines.append(f"  dashboard -> {self.output}")
         return "\n".join(lines)

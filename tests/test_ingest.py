@@ -133,3 +133,111 @@ def test_understat_hex_escaped_payload_is_decoded():
 def test_understat_missing_variable_raises():
     with pytest.raises(ValueError, match="not found"):
         extract_json_var("<html></html>", "shotsData")
+
+
+# --------------------------------------------------------------- openligadb
+
+# The api.openligadb.de payload, camelCase, as the live API serves it. The
+# adapter was written against the older PascalCase spelling and there was no
+# test here at all, so every entry raised `KeyError: 'MatchDateTimeUTC'` and a
+# whole season parsed to nothing -- with 306 identical errors in the report.
+OLDB_CAMEL = [
+    {
+        "matchID": 1,
+        "matchDateTime": "2024-08-24T15:30:00",
+        "matchDateTimeUTC": "2024-08-24T13:30:00Z",
+        "team1": {"teamId": 40, "teamName": "Bayern München"},
+        "team2": {"teamId": 131, "teamName": "VfL Wolfsburg"},
+        "matchIsFinished": True,
+        "matchResults": [
+            {"resultTypeID": 1, "pointsTeam1": 1, "pointsTeam2": 1},
+            {"resultTypeID": 2, "pointsTeam1": 3, "pointsTeam2": 2},
+        ],
+    },
+    {
+        "matchID": 2,
+        "matchDateTimeUTC": "2024-08-24T13:30:00Z",
+        "team1": {"teamName": "Borussia Dortmund"},
+        "team2": {"teamName": "Borussia Mönchengladbach"},
+        "matchIsFinished": False,
+        "matchResults": [],
+    },
+]
+
+
+def _to_pascal(node):
+    """The same payload under the original spelling."""
+    if isinstance(node, dict):
+        return {key[:1].upper() + key[1:]: _to_pascal(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_to_pascal(item) for item in node]
+    return node
+
+
+def _parse_oldb(store, payload):
+    from bet.ingest.base import IngestResult
+    from bet.ingest.openligadb import OpenLigaDBSource
+
+    source = OpenLigaDBSource(store)
+    result = IngestResult(source="openligadb")
+    matches, results = source._parse_season(payload, "bundesliga", "2024-25", result)
+    return matches, results, result
+
+
+@pytest.mark.parametrize("spelling", ["camelCase", "PascalCase"])
+def test_openligadb_parses_either_capitalisation(store, spelling):
+    """The API has served both. Neither may break the adapter."""
+    payload = OLDB_CAMEL if spelling == "camelCase" else _to_pascal(OLDB_CAMEL)
+    matches, results, result = _parse_oldb(store, payload)
+
+    assert result.errors == []
+    assert len(matches) == 2
+    assert matches[0]["home_team_id"] == "bayern_munich"
+    assert matches[0]["away_team_id"] == "vfl_wolfsburg"
+
+    # Only the finished match yields a result.
+    assert len(results) == 1
+    assert (results[0]["home_goals"], results[0]["away_goals"]) == (3, 2)
+    assert results[0]["outcome"] == "H"
+    assert (results[0]["ht_home"], results[0]["ht_away"]) == (1, 1)
+
+
+@pytest.mark.parametrize("spelling", ["camelCase", "PascalCase"])
+def test_openligadb_reads_kickoff_as_utc_not_german_local_time(store, spelling):
+    """`matchDateTime` is local; using it would shift every fixture."""
+    payload = OLDB_CAMEL if spelling == "camelCase" else _to_pascal(OLDB_CAMEL)
+    matches, _, _ = _parse_oldb(store, payload)
+    assert matches[0]["kickoff_utc"] == datetime(2024, 8, 24, 13, 30)
+
+
+def test_openligadb_falls_back_to_local_time_when_utc_is_absent(store):
+    entry = dict(OLDB_CAMEL[0])
+    entry.pop("matchDateTimeUTC")
+    matches, _, result = _parse_oldb(store, [entry])
+    assert matches[0]["kickoff_utc"] == datetime(2024, 8, 24, 15, 30)
+    assert result.errors == []
+
+
+def test_openligadb_collapses_repeated_failures_and_names_the_fields(store):
+    """A renamed field breaks all 306 entries identically.
+
+    One line per fixture would bury every other source's error; and the bare
+    `KeyError` repr said a key was missing without saying which keys exist,
+    which is the one fact that identifies the fix.
+    """
+    broken = [{"whenever": "2024-08-24T13:30:00Z", "home": "x", "away": "y"}] * 306
+    matches, _, result = _parse_oldb(store, broken)
+
+    assert matches == []
+    assert len(result.errors) == 1
+    message = result.errors[0]
+    assert "skipped 306 of 306" in message
+    assert "whenever" in message and "home" in message      # the keys on offer
+    assert "MatchDateTime" in message                       # the key wanted
+
+
+def test_openligadb_reports_an_unknown_club_by_name(store):
+    entry = dict(OLDB_CAMEL[0], team2={"teamName": "Racing Club de Nowhere"})
+    matches, _, result = _parse_oldb(store, [entry])
+    assert matches == []
+    assert "Nowhere" in result.errors[0]

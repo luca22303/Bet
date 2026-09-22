@@ -10,7 +10,7 @@ results ingested from football-data.co.uk.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -20,6 +20,75 @@ from bet.teams import UnknownTeamError, resolve
 
 BASE_URL = "https://api.openligadb.de"
 LEAGUE_SHORTCUTS = {"bundesliga": "bl1", "bundesliga2": "bl2"}
+
+
+def field(entry, name: str):
+    """Read a field regardless of how the API capitalises it.
+
+    OpenLigaDB serves the same data under two spellings: PascalCase
+    (`MatchDateTimeUTC`) on the original openligadb.de/api endpoints, and
+    camelCase (`matchDateTimeUTC`) on api.openligadb.de, which is what
+    `BASE_URL` points at. Pinning one spelling makes the adapter fail
+    completely the day the other is served -- and it was: every entry raised
+    `KeyError: 'MatchDateTimeUTC'`, so a whole season parsed to nothing.
+
+    Matching case-insensitively costs one dict comprehension per miss and
+    survives the switch in either direction, which is worth more than being
+    strict about a capital letter nobody promised us.
+    """
+    if not isinstance(entry, dict):
+        raise TypeError(f"expected a JSON object, got {type(entry).__name__}")
+    if name in entry:
+        return entry[name]
+    folded = {key.lower(): value for key, value in entry.items()}
+    if name.lower() in folded:
+        return folded[name.lower()]
+    raise KeyError(name)
+
+
+def opt(entry, name: str, default=None):
+    """`field`, but a missing field is not an error."""
+    try:
+        return field(entry, name)
+    except (KeyError, TypeError):
+        return default
+
+
+def parse_kickoff(entry) -> datetime:
+    """Kick-off as naive UTC.
+
+    The UTC field is the one to trust: `MatchDateTime` is German local time,
+    so reading it as UTC silently shifts every fixture by an hour or two and
+    moves late Saturday games across a date boundary.
+    """
+    raw = opt(entry, "MatchDateTimeUTC")
+    if not raw:
+        raw = field(entry, "MatchDateTime")     # older payloads; local time
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).replace(tzinfo=None)
+    parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def team_name(entry, side: str) -> str:
+    team = field(entry, side)
+    return field(team, "TeamName")
+
+
+def _describe(entry, exc: Exception) -> str:
+    """Say what was wrong *and* what the payload actually offered.
+
+    `openligadb entry: 'MatchDateTimeUTC'` -- a bare KeyError repr -- says a
+    key was missing but not which keys exist, which is the one fact that
+    identifies the fix. Listing them turns a guess into a diagnosis.
+    """
+    if isinstance(exc, UnknownTeamError):
+        return f"unknown club: {exc}"
+    if isinstance(exc, KeyError):
+        keys = ", ".join(sorted(entry)[:14]) if isinstance(entry, dict) else "not an object"
+        return f"no field {exc.args[0]!r} — entry has: {keys}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 class OpenLigaDBSource(Source):
@@ -59,13 +128,15 @@ class OpenLigaDBSource(Source):
     def _parse_season(self, payload: list, league: str, season: str,
                       result: IngestResult) -> tuple[list, list]:
         matches, results = [], []
+        skipped: list[str] = []
+
         for entry in payload:
             try:
-                kickoff = datetime.fromisoformat(entry["MatchDateTimeUTC"].replace("Z", "+00:00")).replace(tzinfo=None)
-                home = resolve(entry["Team1"]["TeamName"])
-                away = resolve(entry["Team2"]["TeamName"])
+                kickoff = parse_kickoff(entry)
+                home = resolve(team_name(entry, "Team1"))
+                away = resolve(team_name(entry, "Team2"))
             except (KeyError, TypeError, ValueError, UnknownTeamError) as exc:
-                result.errors.append(f"openligadb entry: {exc}")
+                skipped.append(_describe(entry, exc))
                 continue
 
             match_id = make_match_id(league, season, home, away)
@@ -75,22 +146,42 @@ class OpenLigaDBSource(Source):
                 "known_at": kickoff - timedelta(days=30),
             })
 
-            if not entry.get("MatchIsFinished"):
+            if not opt(entry, "MatchIsFinished"):
                 continue
-            final = next((r for r in entry.get("MatchResults", []) if r.get("ResultTypeID") == 2), None)
-            half = next((r for r in entry.get("MatchResults", []) if r.get("ResultTypeID") == 1), None)
+            scores = opt(entry, "MatchResults") or []
+            final = next((r for r in scores if opt(r, "ResultTypeID") == 2), None)
+            half = next((r for r in scores if opt(r, "ResultTypeID") == 1), None)
             if final is None:
                 continue
 
-            home_goals, away_goals = int(final["PointsTeam1"]), int(final["PointsTeam2"])
+            try:
+                home_goals = int(field(final, "PointsTeam1"))
+                away_goals = int(field(final, "PointsTeam2"))
+            except (KeyError, TypeError, ValueError) as exc:
+                skipped.append(_describe(final, exc))
+                continue
+
             results.append({
                 "match_id": match_id, "source": self.name,
                 "home_goals": home_goals, "away_goals": away_goals,
                 "outcome": "H" if home_goals > away_goals else ("D" if home_goals == away_goals else "A"),
-                "ht_home": int(half["PointsTeam1"]) if half else None,
-                "ht_away": int(half["PointsTeam2"]) if half else None,
+                "ht_home": int(opt(half, "PointsTeam1")) if half and opt(half, "PointsTeam1") is not None else None,
+                "ht_away": int(opt(half, "PointsTeam2")) if half and opt(half, "PointsTeam2") is not None else None,
                 "known_at": kickoff + timedelta(seconds=SETTINGS.result_known_after_seconds),
             })
+
+        # One line per season rather than one per fixture. A changed field name
+        # breaks all 306 entries identically, and 306 copies of the same
+        # sentence bury every other source's error in the report.
+        if skipped:
+            counts: dict[str, int] = {}
+            for reason in skipped:
+                counts[reason] = counts.get(reason, 0) + 1
+            worst = max(counts, key=counts.get)
+            result.errors.append(
+                f"openligadb {season}: skipped {len(skipped)} of {len(payload)} "
+                f"entries — {worst}"
+                + (f" (and {len(counts) - 1} other reason(s))" if len(counts) > 1 else ""))
         return matches, results
 
     def upcoming(self, league: str = "bundesliga") -> pd.DataFrame:
@@ -101,11 +192,10 @@ class OpenLigaDBSource(Source):
         for entry in json.loads(text):
             try:
                 rows.append({
-                    "kickoff_utc": datetime.fromisoformat(
-                        entry["MatchDateTimeUTC"].replace("Z", "+00:00")).replace(tzinfo=None),
-                    "home_team_id": resolve(entry["Team1"]["TeamName"]),
-                    "away_team_id": resolve(entry["Team2"]["TeamName"]),
-                    "finished": bool(entry.get("MatchIsFinished")),
+                    "kickoff_utc": parse_kickoff(entry),
+                    "home_team_id": resolve(team_name(entry, "Team1")),
+                    "away_team_id": resolve(team_name(entry, "Team2")),
+                    "finished": bool(opt(entry, "MatchIsFinished")),
                 })
             except (KeyError, TypeError, ValueError, UnknownTeamError):
                 continue
