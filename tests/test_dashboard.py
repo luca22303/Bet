@@ -453,3 +453,122 @@ def test_a_finished_match_in_the_current_matchday_is_coloured(store):
     assert 'class="card correct"' in page or 'class="card miss"' in page
     # Saturday's card is still a plain, unresolved one.
     assert 'class="card"' in page or 'class="card value"' in page
+
+
+# --------------------------------------------------- missing player data
+
+def test_no_player_data_is_explained_not_shown_as_an_empty_pitch(store):
+    """Reported as 'no predicted formations for upcoming matches'.
+
+    The real cause: football_data + openligadb + clubelo alone -- what a
+    default `bet serve --refresh` fetches -- carry no player-level data at
+    all. `predict_formation` honestly falls back to a 0%-confidence default
+    formation with nobody selected, and the page drew that as an empty pitch
+    under a formation label, which reads as broken rather than "not
+    ingested". It is not about how far in the future the match is.
+    """
+    import numpy as np
+
+    from conftest import generate_season
+
+    store.init_schema()
+    rng = np.random.default_rng(6)
+    matches, results, quotes = generate_season(
+        datetime(2023, 8, 10, 15, 30), "2023-24", rng)
+    store.upsert("match", matches, ["match_id"])
+    store.upsert("match_result", results, ["match_id", "source"])
+    store.upsert("odds_quote", quotes,
+                 ["match_id", "book", "market", "selection", "quoted_at"])
+    # Deliberately no player / player_match_stat / lineup rows at all.
+
+    page = build(store, datetime(2024, 1, 5), days=8, include_quality=False)
+    assert "No player data for" in page
+    assert "predicted 0%" not in page
+    assert 'class="pitch"' not in page
+
+
+def test_a_real_low_confidence_prediction_still_shows_the_pitch(store_with_players):
+    """The fallback message must not swallow a genuine, if uncertain, guess."""
+    page = build(store_with_players, datetime(2024, 1, 5), days=8)
+    assert 'class="pitch"' in page
+    assert "No player data for" not in page
+
+
+# --------------------------------------------------- previous-matchday detail
+
+def test_a_previous_matchday_card_opens_into_its_own_detail(store_with_players):
+    """Reported: 'for past matches, I cannot see details of the match.'
+
+    A played fixture should open into the same formation/lineup/scoreline
+    detail a live one does -- there is no reason the confirmed XI that
+    actually played is any less available than a predicted one.
+    """
+    page = build(store_with_players, datetime(2024, 1, 5), days=8)
+    m = __import__("re").search(r'<details class="history">(.*?)</details>', page, __import__("re").S)
+    history_block = m.group(1)
+    assert 'role="button"' in history_block
+    assert 'class="pitch"' in history_block
+    assert "Scorelines" in history_block
+
+
+def test_a_previous_matchday_card_explains_missing_player_data_too(store):
+    """The same honest fallback applies looking backward as forward."""
+    import numpy as np
+
+    from conftest import generate_season
+
+    store.init_schema()
+    rng = np.random.default_rng(7)
+    matches, results, quotes = generate_season(
+        datetime(2022, 8, 10, 15, 30), "2022-23", rng)
+    store.upsert("match", matches, ["match_id"])
+    store.upsert("match_result", results, ["match_id", "source"])
+    store.upsert("odds_quote", quotes,
+                 ["match_id", "book", "market", "selection", "quoted_at"])
+
+    friday = datetime(2024, 9, 20, 18, 30)
+    as_of = friday + timedelta(hours=6)
+    store.upsert("match", pd.DataFrame([{
+        "match_id": "friday", "source": "t", "league": "bundesliga",
+        "season": "2024-25", "kickoff_utc": friday,
+        "home_team_id": "bayern_munich", "away_team_id": "rb_leipzig",
+        "known_at": friday - timedelta(days=30),
+    }]), ["match_id"])
+    store.upsert("match_result", pd.DataFrame([{
+        "match_id": "friday", "source": "t", "home_goals": 1, "away_goals": 1,
+        "outcome": "D", "ht_home": 0, "ht_away": 0,
+        "known_at": friday + timedelta(hours=2),
+    }]), ["match_id", "source"])
+
+    page = build(store, as_of, days=8, include_quality=False)
+    m = __import__("re").search(r'<details class="history">(.*?)</details>', page, __import__("re").S)
+    assert "No player data for" in m.group(1)
+
+
+def test_one_side_missing_player_data_still_shows_the_others_pitch(store):
+    """A newly promoted club with no fbref history yet, playing an established
+    one that has it -- the common real case, not an all-or-nothing one."""
+    import numpy as np
+
+    from conftest import (TEAMS, generate_player_stats, generate_season,
+                          lineup_rows_from_stats)
+
+    store.init_schema()
+    rng = np.random.default_rng(8)
+    matches, results, quotes = generate_season(
+        datetime(2023, 8, 10, 15, 30), "2023-24", rng)
+    store.upsert("match", matches, ["match_id"])
+    store.upsert("match_result", results, ["match_id", "source"])
+    store.upsert("odds_quote", quotes,
+                 ["match_id", "book", "market", "selection", "quoted_at"])
+
+    players, stats = generate_player_stats(matches, rng)
+    without_one_team = stats[stats["team_id"] != TEAMS[0]]
+    store.upsert("player", players.drop_duplicates("player_id"), ["player_id"])
+    store.upsert("player_match_stat", without_one_team, ["match_id", "player_id", "source"])
+    store.upsert("lineup", lineup_rows_from_stats(without_one_team, matches),
+                 ["match_id", "player_id", "source", "known_at"])
+
+    page = build(store, datetime(2024, 1, 5), days=8, include_quality=False)
+    assert "No player data for" in page
+    assert 'class="pitch"' in page          # the other side still gets one

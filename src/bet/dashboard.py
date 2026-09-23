@@ -587,13 +587,17 @@ def _fixture_card(match, detail: dict | None, index: int) -> str:
             f"{_match_detail_html(match, detail, index)}</div>")
 
 
-def _history_card(match) -> str:
+def _history_card(match, detail: dict | None, index: int) -> str:
     """A played fixture: the point-in-time prediction, and what happened.
 
     Fit strictly before that matchday kicked off (see
     `bet.recommend.previous_matchday_brief`), so this is what the model would
     genuinely have said beforehand -- not a prediction dressed up with
     hindsight -- shown next to the result it is being judged against.
+
+    Opens into the same formation/lineup/scoreline detail a live fixture card
+    does, when there is any: whether fbref/kicker ever had player data for
+    this match does not depend on it being in the past.
     """
     labels = {"H": _team(match.home_team), "D": "Draw", "A": _team(match.away_team)}
     verdict = _verdict_tag(match)
@@ -601,17 +605,14 @@ def _history_card(match) -> str:
     actual = (f'{match.actual_home_goals:.0f} &ndash; {match.actual_away_goals:.0f}'
              if match.actual_outcome is not None else "&mdash;")
 
-    # No expand chevron here: unlike a live fixture card, there is no lineup
-    # detail behind this one to reveal, and a clickable-looking header with
-    # nothing to open is worse than a plain one.
     head = (
-        '<div class="cardhead" style="cursor:default">'
+        f'<div class="cardhead" role="button" tabindex="0" aria-expanded="false">'
         f'<div><div class="fixture">{esc(_team(match.home_team))} '
         f'<span class="kick">vs</span> {esc(_team(match.away_team))}</div>'
         f'<div class="kick">{match.kickoff:%a %d %b %H:%M} &middot; full time</div></div>'
         f'<div style="text-align:right"><span class="fixture">{actual}</span> {verdict}'
         f'<div class="kick">predicted {match.expected_home_goals:.2f} &ndash; '
-        f'{match.expected_away_goals:.2f} xG</div>'
+        f'{match.expected_away_goals:.2f} xG <span class="chev">&#9656;</span></div>'
         "</div></div>")
 
     body = _probability_block(match, labels)
@@ -634,7 +635,8 @@ def _history_card(match) -> str:
 
     classes = _outcome_class(match) or "card"
     return (f'<div class="{classes}" data-open="0">{head}'
-            f'<div style="padding:0 15px 13px">{"".join(body)}</div></div>')
+            f'<div style="padding:0 15px 13px">{"".join(body)}</div>'
+            f"{_match_detail_html(match, detail, index)}</div>")
 
 
 def _match_detail_html(match, detail: dict | None, index: int) -> str:
@@ -645,10 +647,38 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
 
     parts = ['<div class="detail">']
 
+    # A team with no appearance history at all -- fbref (or kicker for the
+    # confirmed XI) was never ingested -- gets `DEFAULT_FORMATION` at 0%
+    # confidence and an empty starters list. That is the model correctly
+    # saying "nothing is known", not a real prediction, and drawing an empty
+    # pitch under a formation label dressed it up as one. Distinguishing it
+    # from a genuine low-confidence guess (which still has starters, just an
+    # uncertain XI, and is worth showing with its dashed-ring markers) matters:
+    # one is "no data", the other is "some data, honestly uncertain".
+    no_data_sides = [side for side in ("home", "away")
+                     if detail["squads"].get(side)
+                     and not detail["squads"][side]["players"]]
+    have_data_sides = [side for side in ("home", "away")
+                      if detail["squads"].get(side) and detail["squads"][side]["players"]]
+
+    if no_data_sides and not have_data_sides:
+        names = " and ".join(esc(_team(detail["squads"][s]["team_id"])) for s in no_data_sides)
+        parts.append(
+            '<div class="empty">No player data for '
+            f"{names}. Run <code>bet ingest --source fbref</code> to predict "
+            "line-ups and formations for this fixture.</div></div>")
+        return "".join(parts)
+
     pitches = []
     for side in ("home", "away"):
         squad = detail["squads"].get(side)
         if not squad:
+            continue
+        if side in no_data_sides:
+            pitches.append(
+                f'<div class="pitchwrap"><h3>{esc(_team(squad["team_id"]))}</h3>'
+                '<div class="empty" style="margin-top:20px">No player data for this '
+                "club yet.</div></div>")
             continue
         lineup = squad["lineup"]
         source = ('<span class="tag ok">confirmed</span>' if lineup.is_confirmed
@@ -665,6 +695,12 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
                     confirmed=lineup.is_confirmed)
             + "</div>")
     parts.append(f'<div class="pitches">{"".join(pitches)}</div>')
+
+    if no_data_sides:
+        names = " and ".join(esc(_team(detail["squads"][s]["team_id"])) for s in no_data_sides)
+        parts.append(f'<div class="caption">No player data for {names} yet -- run '
+                     "<code>bet ingest --source fbref</code> to predict its line-up "
+                     "too.</div>")
 
     if not any(detail["squads"][s]["lineup"].is_confirmed
                for s in detail["squads"]):
@@ -689,8 +725,8 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
     squad_tables = []
     for side in ("home", "away"):
         squad = detail["squads"].get(side)
-        if not squad:
-            continue
+        if not squad or side in no_data_sides:
+            continue        # already explained above; an empty table repeats it
         absent = (f'<div class="meta" style="margin-top:6px"><span class="kick">'
                   f'unavailable: {esc(", ".join(_short(a) for a in squad["absent"]))}'
                   f"</span></div>") if squad["absent"] else ""
@@ -937,7 +973,7 @@ SERVED_SCRIPT = """
 """
 
 
-def _previous_matchday_panel(previous) -> str:
+def _previous_matchday_panel(previous, details: dict | None = None) -> str:
     """A collapsed, expand-on-demand look back at the last matchday.
 
     Closed by default so the page opens on what is coming up, not what
@@ -948,10 +984,12 @@ def _previous_matchday_panel(previous) -> str:
     if previous is None or not previous.matches:
         return ""
 
+    details = details or {}
     scored = [m for m in previous.matches if m.predicted_correct is not None]
     record = (f" &middot; {sum(1 for m in scored if m.predicted_correct)}/"
              f"{len(scored)} correct" if scored else "")
-    cards = "".join(_history_card(m) for m in previous.matches)
+    cards = "".join(_history_card(m, details.get(m.match_id), i)
+                    for i, m in enumerate(previous.matches))
 
     return (
         '<details class="history">'
@@ -960,7 +998,8 @@ def _previous_matchday_panel(previous) -> str:
         "</details>")
 
 
-def render(store, brief, *, previous=None, coverage=None, quality_report=None,
+def render(store, brief, *, previous=None, previous_details: dict | None = None,
+           coverage=None, quality_report=None,
            backtest: dict | None = None, details: dict | None = None,
            provenance: dict | None = None, as_of: datetime | None = None,
            served: bool = False) -> str:
@@ -976,7 +1015,7 @@ def render(store, brief, *, previous=None, coverage=None, quality_report=None,
     controls = CONTROLS if served else ""
     served_script = SERVED_SCRIPT if served else ""
 
-    history_panel = _previous_matchday_panel(previous)
+    history_panel = _previous_matchday_panel(previous, previous_details)
     cards = "".join(_fixture_card(m, details.get(m.match_id), i)
                     for i, m in enumerate(brief.matches))
     fixtures_view = history_panel + (cards or ('<div class="panel"><div class="empty">'
@@ -1050,25 +1089,42 @@ def build(store, as_of: datetime | None = None, *, days: int = 8,
         quality_report = run_quality_checks(store, as_of)
         coverage = quality_report.coverage
 
-    details = {}
-    if brief.matches:
-        from bet.models.dixon_coles import DixonColesModel
-        model = DixonColesModel(use_availability=True).fit(store, as_of)
-        if model.params is not None:
-            rates = store.player_rates_as_of(as_of, min_minutes=0.0)
-            names = store.con.execute(
-                "SELECT player_id, full_name FROM player").df()
-            name_map = dict(zip(names["player_id"], names["full_name"])) \
-                if not names.empty else {}
-            for match in brief.matches:
-                details[match.match_id] = build_match_detail(
-                    store, model, match, as_of, rates, name_map)
+    names = store.con.execute("SELECT player_id, full_name FROM player").df()
+    name_map = dict(zip(names["player_id"], names["full_name"])) if not names.empty else {}
+
+    details = _build_match_details(store, brief.matches, as_of, name_map)
+    # Built at "now", unlike the predictions in the cards themselves. The
+    # detail panel is the historical record, not a graded forecast: the
+    # probabilities and expected goals stay exactly what the model would
+    # genuinely have said before kickoff (fit at `previous.as_of`), but the
+    # confirmed line-up that actually played is worth showing as what it is
+    # once it is known, rather than freezing the lookup at the same instant
+    # for no reason -- the same way the actual score is shown next to the
+    # prediction rather than withheld.
+    previous_details = _build_match_details(store, previous.matches, as_of, name_map)
 
     backtest = _run_backtest(store, backtest_from, league) if backtest_from else None
-    return render(store, brief, previous=previous, coverage=coverage,
-                  quality_report=quality_report, backtest=backtest, details=details,
-                  provenance=data_provenance(store, as_of), as_of=as_of,
+    return render(store, brief, previous=previous, previous_details=previous_details,
+                  coverage=coverage, quality_report=quality_report, backtest=backtest,
+                  details=details, provenance=data_provenance(store, as_of), as_of=as_of,
                   served=served)
+
+
+def _build_match_details(store, matches: list, as_of: datetime,
+                         name_map: dict[str, str]) -> dict:
+    """Formation, lineup and scoreline detail for a list of recommendations,
+    all read as of the same moment used to price them."""
+    if not matches:
+        return {}
+
+    from bet.models.dixon_coles import DixonColesModel
+    model = DixonColesModel(use_availability=True).fit(store, as_of)
+    if model.params is None:
+        return {}
+
+    rates = store.player_rates_as_of(as_of, min_minutes=0.0)
+    return {match.match_id: build_match_detail(store, model, match, as_of, rates, name_map)
+            for match in matches}
 
 
 def _run_backtest(store, start: str, league: str) -> dict | None:
