@@ -303,3 +303,86 @@ def test_passing_a_match_id_does_not_change_an_unconfirmed_prediction(store_with
     assert set(without.starters) == set(with_id.starters)
     assert (lineup_strength_shift(store, team, as_of, rates, without)["attack_shift"]
             == lineup_strength_shift(store, team, as_of, rates, with_id)["attack_shift"])
+
+
+# --------------------------------------------------------- stale-history fallback
+
+def _settled_squad_history(store, *, team_id: str, as_of: datetime, weeks_ago_start: int):
+    """`weeks_ago_start` identical matches, the same eleven every week, the
+    most recent one `weeks_ago_start` weeks before `as_of`."""
+    squad = [("gk", "GK")] + [(f"d{i}", "DF") for i in range(4)] \
+        + [(f"m{i}", "MF") for i in range(3)] + [(f"f{i}", "FW") for i in range(3)]
+    matches, rows = [], []
+    for i in range(10):
+        day = as_of - timedelta(weeks=weeks_ago_start + (9 - i))
+        matches.append({
+            "match_id": f"stale{i}", "source": "t", "league": "bundesliga",
+            "season": "2022-23", "kickoff_utc": day,
+            "home_team_id": team_id, "away_team_id": "sc_freiburg",
+            "known_at": day - timedelta(days=30),
+        })
+        for player, position in squad:
+            rows.append({
+                "match_id": f"stale{i}", "player_id": player, "team_id": team_id,
+                "source": "t", "position": position, "started": True, "minutes": 90.0,
+                "known_at": day + timedelta(hours=2),
+            })
+    store.upsert("match", pd.DataFrame(matches), ["match_id"])
+    store.upsert("player_match_stat", pd.DataFrame(rows), ["match_id", "player_id", "source"])
+
+
+def test_a_stale_but_real_history_still_predicts_a_formation(store):
+    """The worst case should be repeating the last known shape, not nothing.
+
+    A hard 180-day cutoff turned "this team's last recorded match was 200
+    days ago" into "no history at all" -- a shapeless, 0%-confidence guess --
+    when older, still-real data was sitting right there.
+    """
+    as_of = datetime(2024, 3, 1)
+    _settled_squad_history(store, team_id="bayern_munich", as_of=as_of, weeks_ago_start=30)
+
+    formation, confidence, rotation = predict_formation(store, "bayern_munich", as_of)
+    assert formation == "4-3-3"
+    assert confidence > 0.0
+
+
+def test_a_stale_but_real_history_still_predicts_starters(store):
+    as_of = datetime(2024, 3, 1)
+    _settled_squad_history(store, team_id="bayern_munich", as_of=as_of, weeks_ago_start=30)
+
+    propensity = start_propensity(store, "bayern_munich", as_of)
+    assert not propensity.empty
+    assert set(propensity["player_id"]) == {
+        "gk", "d0", "d1", "d2", "d3", "m0", "m1", "m2", "f0", "f1", "f2"}
+
+
+def test_predict_lineup_still_names_an_xi_from_stale_history(store):
+    as_of = datetime(2024, 3, 1)
+    _settled_squad_history(store, team_id="bayern_munich", as_of=as_of, weeks_ago_start=30)
+
+    lineup = predict_lineup(store, "bayern_munich", as_of)
+    assert len(lineup.starters) == 11
+    assert any("weak guess" in n for n in lineup.notes)
+    assert any("no appearance data in the last 180 days" in n for n in lineup.notes)
+
+
+def test_fresh_history_never_mentions_a_fallback(store_with_players):
+    """The widened search must not fire, or be mentioned, when it was not
+    needed -- a note on every prediction would just be noise."""
+    lineup = predict_lineup(store_with_players, "bayern_munich", datetime(2024, 1, 5))
+    assert not any("weak guess" in n for n in lineup.notes)
+
+
+def test_genuinely_no_history_at_all_is_unchanged(store):
+    """The absolute floor -- nothing ever ingested -- must still fall back to
+    the honest empty prediction, not crash trying to widen a search that
+    finds nothing either way."""
+    store.init_schema()
+    assert start_propensity(store, "bayern_munich", datetime(2024, 3, 1)).empty
+    formation, confidence, rotation = predict_formation(
+        store, "bayern_munich", datetime(2024, 3, 1))
+    assert confidence == 0.0
+
+    lineup = predict_lineup(store, "bayern_munich", datetime(2024, 3, 1))
+    assert lineup.starters == []
+    assert any("no XI predicted" in n for n in lineup.notes)

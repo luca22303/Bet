@@ -572,3 +572,96 @@ def test_one_side_missing_player_data_still_shows_the_others_pitch(store):
     page = build(store, datetime(2024, 1, 5), days=8, include_quality=False)
     assert "No player data for" in page
     assert 'class="pitch"' in page          # the other side still gets one
+
+
+# ---------------------------------------------------------- player modal
+
+def test_player_modal_shows_the_real_box_score_for_a_played_match():
+    from bet.dashboard import _player_modal
+
+    modal = _player_modal(
+        "p1", "Kramer", "VfL Bochum", "defender", "DF", 0.9, 3,
+        {"minutes": 79, "goals": 0, "assists": 0, "shots": 1,
+         "shots_on_target": 0, "xg": 0.08, "tackles": 2, "interceptions": 1,
+         "yellow_cards": 1, "red_cards": 0},
+        played=True)
+
+    rows = dict(modal["rows"])
+    assert rows["Minutes"] == "79"
+    assert rows["xG"] == "0.08"
+    assert rows["Cards"] == "1 yellow"
+    assert modal["note"] == ""
+
+
+def test_player_modal_notes_missing_keeper_stats_rather_than_faking_them():
+    from bet.dashboard import _player_modal
+
+    modal = _player_modal(
+        "gk1", "Neuer", "Bayern", "goalkeeper", "GK", 1.0, 0,
+        {"minutes": 90, "goals": 0, "assists": 0}, played=True)
+
+    rows = dict(modal["rows"])
+    assert "Shots" not in rows           # not a keeper stat
+    assert "saves" in modal["note"].lower()
+
+
+def test_player_modal_on_an_upcoming_fixture_shows_context_not_a_fake_score():
+    from bet.dashboard import _player_modal
+
+    modal = _player_modal(
+        "p2", "Kane", "Bayern", "forward", "FW", 0.95, 4, None, played=False)
+
+    rows = dict(modal["rows"])
+    assert rows["Start confidence"] == "95%"
+    assert "Goals" not in rows
+    assert "not this match" in modal["note"] or "rolling per-90" in modal["note"]
+
+
+def test_a_named_but_unused_substitute_says_so(): 
+    from bet.dashboard import _player_modal
+
+    modal = _player_modal(
+        "p3", "Sub", "Bayern", "midfielder", "MF", 0.4, 10, None, played=True)
+    rows = dict(modal["rows"])
+    assert rows["Minutes"] == "0"
+    assert "did not play" in modal["note"]
+
+
+def test_pitch_marks_are_clickable_with_an_embedded_payload():
+    from bet.viz import pitch
+
+    players = [{"name": "Test Player", "short": "TP", "row": 0, "row_size": 1,
+               "modal": {"name": "Test Player", "team": "X", "rows": [["Minutes", "90"]], "note": ""}}]
+    svg = pitch("4-3-3", players, team_name="X")
+    assert 'class="playermark"' in svg
+    assert 'data-player=' in svg
+    assert 'role="button"' in svg
+
+
+def test_a_mark_with_no_modal_data_is_not_clickable():
+    """A pitch built without per-player detail (e.g. a stripped-down caller)
+    must not claim to be clickable with nothing behind it."""
+    from bet.viz import pitch
+
+    players = [{"name": "Test Player", "short": "TP", "row": 0, "row_size": 1}]
+    svg = pitch("4-3-3", players, team_name="X")
+    assert 'class="playermark"' not in svg
+
+
+def test_match_detail_has_a_formation_heatmap_ticker_switcher(store_with_players):
+    page = build(store_with_players, datetime(2024, 1, 5), days=8)
+    assert 'class="subnav"' in page
+    assert ">Formation</button>" in page
+    assert ">Heatmaps</button>" in page
+    assert ">Ticker</button>" in page
+    # Real data source, not a fabricated one.
+    assert "Sofascore" not in page or "unverified" in page.lower()
+
+
+def test_each_matchs_subtabs_have_unique_ids(store_with_players):
+    """Two fixtures on one page must not share a sub-tab switcher."""
+    import re
+
+    page = build(store_with_players, datetime(2024, 1, 5), days=8)
+    ids = re.findall(r'id="([\w-]+-formation)"', page)
+    assert len(ids) == len(set(ids)), "duplicate sub-tab ids across fixtures"

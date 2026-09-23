@@ -120,6 +120,32 @@ nav button[aria-selected="true"] { color:var(--ink); border-bottom-color:var(--s
 .detail { display:none; padding:0 15px 15px; border-top:1px solid var(--border); }
 .card[data-open="1"] .detail { display:block; }
 
+.subtabs { margin-top:2px; }
+.subnav { display:flex; gap:2px; border-bottom:1px solid var(--border); margin-bottom:12px; }
+.subnav button { background:none; border:none; border-bottom:2px solid transparent;
+  padding:7px 12px; font:inherit; font-size:13px; color:var(--ink-2); cursor:pointer; }
+.subnav button[aria-selected="true"] { color:var(--ink); border-bottom-color:var(--s1);
+  font-weight:600; }
+.subview { display:none; }
+.subview.on { display:block; }
+.playermark { cursor:pointer; }
+.playermark:focus-visible circle.player { outline:2px solid var(--s1); outline-offset:2px; }
+
+#player-modal-backdrop { position:fixed; inset:0; background:rgba(11,11,11,0.45);
+  display:flex; align-items:center; justify-content:center; z-index:100; padding:16px; }
+#player-modal-backdrop[hidden] { display:none; }
+#player-modal { background:var(--surface); border-radius:12px; padding:20px 22px;
+  max-width:360px; width:100%; max-height:80vh; overflow-y:auto; position:relative;
+  box-shadow:0 12px 40px rgba(11,11,11,0.25); }
+#pm-close { position:absolute; top:10px; right:12px; background:none; border:none;
+  font-size:22px; line-height:1; color:var(--muted); cursor:pointer; padding:4px; }
+#pm-close:hover { color:var(--ink); }
+#player-modal h3 { font-size:17px; margin:0 0 2px; padding-right:20px; }
+#pm-rows > div { display:flex; justify-content:space-between; gap:14px;
+  padding:5px 0; border-bottom:1px solid var(--border); font-size:13.5px; }
+#pm-rows > div:last-child { border-bottom:none; }
+#pm-rows b { font-weight:600; }
+
 .history { margin-bottom:14px; }
 .history summary { cursor:pointer; list-style:none; font-size:13px;
   font-weight:600; color:var(--ink-2); padding:9px 2px;
@@ -235,6 +261,20 @@ SCRIPT = """
     });
   });
 
+  // Formation/Heatmaps/Ticker inside one fixture's detail. Scoped to the
+  // nearest .subtabs so every card's own switcher is independent -- there is
+  // one of these per fixture on the page, not one globally.
+  document.querySelectorAll('.subnav button').forEach(function(b){
+    b.addEventListener('click', function(e){
+      e.stopPropagation();
+      var group = b.closest('.subtabs');
+      group.querySelectorAll('.subnav button').forEach(function(x){
+        x.setAttribute('aria-selected', x === b); });
+      group.querySelectorAll('.subview').forEach(function(v){
+        v.classList.toggle('on', v.id === b.dataset.subview); });
+    });
+  });
+
   function toggle(card){
     card.dataset.open = card.dataset.open === '1' ? '0' : '1';
     card.querySelector('.cardhead').setAttribute(
@@ -245,6 +285,47 @@ SCRIPT = """
     h.addEventListener('keydown', function(e){
       if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggle(h.parentElement); }
     });
+  });
+
+  // Clicking a player's mark on the pitch opens their stats for this fixture.
+  // The payload is embedded on the mark itself (data-player, a JSON blob) so
+  // this needs no lookup table and works for every pitch on the page, current
+  // matchday or previous.
+  var backdrop = document.getElementById('player-modal-backdrop');
+  var pmName = document.getElementById('pm-name');
+  var pmTeam = document.getElementById('pm-team');
+  var pmRows = document.getElementById('pm-rows');
+  var pmNote = document.getElementById('pm-note');
+
+  function openPlayerModal(payload){
+    var data;
+    try { data = JSON.parse(payload); } catch(e){ return; }
+    pmName.textContent = data.name || '';
+    pmTeam.textContent = data.team || '';
+    pmRows.innerHTML = (data.rows || []).map(function(row){
+      return '<div><span>' + row[0] + '</span><b>' + row[1] + '</b></div>';
+    }).join('');
+    pmNote.textContent = data.note || '';
+    pmNote.style.display = data.note ? '' : 'none';
+    backdrop.hidden = false;
+    document.getElementById('pm-close').focus();
+  }
+
+  function closePlayerModal(){ backdrop.hidden = true; }
+
+  document.addEventListener('click', function(e){
+    var mark = e.target.closest('.playermark');
+    if(mark){ e.stopPropagation(); openPlayerModal(mark.getAttribute('data-player')); return; }
+    if(e.target === backdrop || e.target.id === 'pm-close'){ closePlayerModal(); }
+  });
+  document.addEventListener('keydown', function(e){
+    var mark = e.target.closest && e.target.closest('.playermark');
+    if(mark && (e.key === 'Enter' || e.key === ' ')){
+      e.preventDefault(); e.stopPropagation();
+      openPlayerModal(mark.getAttribute('data-player'));
+      return;
+    }
+    if(e.key === 'Escape' && !backdrop.hidden){ closePlayerModal(); }
   });
 
 })();
@@ -268,6 +349,72 @@ def _player_name(player_id: str, names: dict[str, str]) -> str:
     if name:
         return name.split()[-1] if " " in name else name
     return str(player_id).split("_")[-1].replace("-", " ").title()
+
+
+def _num(value, digits: int = 0) -> str | None:
+    """A stat as a plain string for the modal, or `None` to hide the row.
+
+    `None` rather than "0" or "0.0" for a value that was never recorded (goals
+    on an upcoming fixture, say) -- a real zero and an absent number look
+    identical as text, and only one of them is a fact.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    return f"{value:.{digits}f}"
+
+
+def _player_modal(player_id: str, name: str, team: str, group: str, position: str,
+                  propensity: float | None, days_since_start,
+                  box_score: dict | None, played: bool) -> dict:
+    """What clicking this player's marker on the pitch shows.
+
+    A played match has its own box score -- the real minutes, goals and
+    assists from this fixture. An upcoming one only has the rolling per-90
+    rate that fed the prediction, and says so rather than presenting a rate
+    as if it were this match's number.
+    """
+    rows: list[tuple[str, str]] = [("Position", position or group.replace("_", " ").title())]
+
+    if played and box_score:
+        rows.append(("Minutes", _num(box_score.get("minutes")) or "0"))
+        rows.append(("Goals", _num(box_score.get("goals")) or "0"))
+        rows.append(("Assists", _num(box_score.get("assists")) or "0"))
+        if group != "goalkeeper":
+            shots = _num(box_score.get("shots"))
+            if shots is not None:
+                rows.append(("Shots", shots))
+            sot = _num(box_score.get("shots_on_target"))
+            if sot is not None:
+                rows.append(("Shots on target", sot))
+            xg = _num(box_score.get("xg"), 2)
+            if xg is not None:
+                rows.append(("xG", xg))
+            tackles = _num(box_score.get("tackles"))
+            if tackles is not None:
+                rows.append(("Tackles", tackles))
+            interceptions = _num(box_score.get("interceptions"))
+            if interceptions is not None:
+                rows.append(("Interceptions", interceptions))
+        yellow = box_score.get("yellow_cards") or 0
+        red = box_score.get("red_cards") or 0
+        if yellow or red:
+            rows.append(("Cards", f"{int(yellow)} yellow" + (f", {int(red)} red" if red else "")))
+        note = ("No goalkeeper-specific stats (saves, goals conceded) yet -- "
+                "FBref publishes them in a separate table this parser does not "
+                "read." if group == "goalkeeper" else "")
+    elif played:
+        rows.append(("Minutes", "0"))
+        note = "Named in the squad but did not play, per the source ingested."
+    else:
+        rows.append(("Start confidence",
+                     f"{propensity:.0%}" if propensity is not None else "&mdash;"))
+        rows.append(("Last started",
+                     f"{int(days_since_start)}d ago" if days_since_start is not None
+                     and not pd.isna(days_since_start) else "never"))
+        note = ("Not played yet -- these are the rolling per-90 rates behind the "
+                "prediction, not this match's own numbers.")
+
+    return {"name": name, "team": team, "rows": rows, "note": note}
 
 
 # ----------------------------------------------------------- expected score
@@ -350,6 +497,25 @@ def build_match_detail(store, model, match, as_of: datetime,
         "squads": {},
     }
 
+    # A played match has its own box score -- goals, assists, minutes actually
+    # played -- which is what clicking a player should show first. An
+    # upcoming one has only the rolling per-90 rate, which is context for a
+    # guess rather than a record, and the modal says which one it is looking
+    # at rather than presenting a rate as though it were this match's number.
+    played = match.actual_outcome is not None
+    box_score: dict[str, dict] = {}
+    if played:
+        all_ids = list(match.lineups.get("home").starters if match.lineups.get("home") else []) + \
+                  list(match.lineups.get("home").bench if match.lineups.get("home") else []) + \
+                  list(match.lineups.get("away").starters if match.lineups.get("away") else []) + \
+                  list(match.lineups.get("away").bench if match.lineups.get("away") else [])
+        if all_ids:
+            actual = store.player_stats_as_of(as_of, player_ids=all_ids)
+            if not actual.empty:
+                actual = actual[actual["match_id"] == match.match_id]
+                box_score = {row.player_id: row._asdict()
+                            for row in actual.itertuples(index=False)}
+
     for side, team_id in (("home", match.home_team), ("away", match.away_team)):
         lineup = match.lineups.get(side)
         if lineup is None:
@@ -367,19 +533,25 @@ def build_match_detail(store, model, match, as_of: datetime,
             row = rates[rates["player_id"] == player_id]
             stats = row.iloc[0].to_dict() if not row.empty else {}
             from bet.players import position_group
+            group = position_group(stats.get("position"))
+            days_since_start = (None if pd.isna(recency.get(player_id))
+                                else recency.get(player_id))
             players.append({
                 "player_id": player_id,
                 "name": _player_name(player_id, names),
                 "short": _short(player_id),
-                "group": position_group(stats.get("position")),
+                "group": group,
                 "position": stats.get("position") or "",
                 "propensity": lineup.propensities.get(player_id),
                 "minutes": float(stats.get("minutes") or 0.0),
                 "xg90": float(stats.get("xg_p90") or 0.0),
                 "shots90": float(stats.get("shots_p90") or 0.0),
                 "tackles90": float(stats.get("tackles_p90") or 0.0),
-                "days_since_start": (None if pd.isna(recency.get(player_id))
-                                     else recency.get(player_id)),
+                "days_since_start": days_since_start,
+                "modal": _player_modal(
+                    player_id, _player_name(player_id, names), _team(team_id),
+                    group, stats.get("position") or "", lineup.propensities.get(player_id),
+                    days_since_start, box_score.get(player_id), played),
             })
 
         bench = []
@@ -669,6 +841,8 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
             "line-ups and formations for this fixture.</div></div>")
         return "".join(parts)
 
+    uid = match.match_id.replace(":", "-")
+
     pitches = []
     for side in ("home", "away"):
         squad = detail["squads"].get(side)
@@ -693,20 +867,45 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
             f'<b>{esc(lineup.formation)}</b> {source}</span></div>'
             + pitch(lineup.formation, players, team_name=_team(squad["team_id"]),
                     confirmed=lineup.is_confirmed)
+            + "".join(f'<div class="note">{esc(note)}</div>' for note in lineup.notes)
             + "</div>")
-    parts.append(f'<div class="pitches">{"".join(pitches)}</div>')
+
+    formation_tab = [f'<div class="pitches">{"".join(pitches)}</div>']
 
     if no_data_sides:
         names = " and ".join(esc(_team(detail["squads"][s]["team_id"])) for s in no_data_sides)
-        parts.append(f'<div class="caption">No player data for {names} yet -- run '
-                     "<code>bet ingest --source fbref</code> to predict its line-up "
-                     "too.</div>")
+        formation_tab.append(f'<div class="caption">No player data for {names} yet -- run '
+                             "<code>bet ingest --source fbref</code> to predict its line-up "
+                             "too.</div>")
 
     if not any(detail["squads"][s]["lineup"].is_confirmed
                for s in detail["squads"]):
-        parts.append('<div class="caption">A dashed ring marks a player the model '
-                     "is less than 55% sure will start. Positions show the named "
-                     "shape, not tracked movement.</div>")
+        formation_tab.append('<div class="caption">A dashed ring marks a player the model '
+                             "is less than 55% sure will start. Positions show the named "
+                             "shape, not tracked movement.</div>")
+
+    heatmap_tab = (
+        '<div class="empty">Heatmaps need touch-location data no source ingested '
+        "here currently provides. A coarse zone-based version (FBref's six pitch "
+        "zones per player) is planned; a smooth touch heatmap like Sofascore's "
+        "needs its own, unverified source.</div>")
+
+    ticker_tab = (
+        '<div class="empty">No live play-by-play source is ingested yet. Planned '
+        "from kicker's match ticker, written against its page structure and "
+        "verified once reachable from outside this sandbox -- like the confirmed "
+        "line-up scraper already is.</div>")
+
+    parts.append(
+        f'<div class="subtabs"><nav class="subnav" role="tablist">'
+        f'<button data-subview="{uid}-formation" aria-selected="true">Formation</button>'
+        f'<button data-subview="{uid}-heatmaps" aria-selected="false">Heatmaps</button>'
+        f'<button data-subview="{uid}-ticker" aria-selected="false">Ticker</button>'
+        f'</nav>'
+        f'<div class="subview on" id="{uid}-formation">{"".join(formation_tab)}</div>'
+        f'<div class="subview" id="{uid}-heatmaps">{heatmap_tab}</div>'
+        f'<div class="subview" id="{uid}-ticker">{ticker_tab}</div>'
+        f'</div>')
 
     # Likely scorelines, as a small ranked chart rather than a table of numbers.
     score = detail["score"]
@@ -1040,6 +1239,15 @@ def render(store, brief, *, previous=None, previous_details: dict | None = None,
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bundesliga model</title><style>{STYLE}</style></head>
 <body><div id="tip"></div>
+<div id="player-modal-backdrop" hidden>
+  <div id="player-modal" role="dialog" aria-modal="true" aria-labelledby="pm-name">
+    <button id="pm-close" aria-label="Close">&times;</button>
+    <h3 id="pm-name"></h3>
+    <div id="pm-team" class="kick"></div>
+    <div id="pm-rows" class="meta" style="display:block;margin-top:10px"></div>
+    <div id="pm-note" class="note"></div>
+  </div>
+</div>
 <div class="wrap" style="position:relative">
 <header><h1>Bundesliga model</h1>
 <div class="sub">Generated {generated:%Y-%m-%d %H:%M} UTC &middot;

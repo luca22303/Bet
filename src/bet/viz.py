@@ -20,6 +20,7 @@ as separate rather than merging into one block.
 from __future__ import annotations
 
 import html
+import json
 import math
 from dataclasses import dataclass
 
@@ -413,12 +414,26 @@ def pitch(formation: str, players: list[dict], *, width: int = 300,
         uncertain = (not confirmed and propensity is not None and propensity < 0.55)
         cls = "player uncertain" if uncertain else "player"
         tip = player.get("tip") or player.get("name", "")
+
+        modal = player.get("modal")
+        group_open = "<g>"
+        group_close = "</g>"
+        if modal:
+            # The whole mark -- circle, initials, name -- opens the same
+            # modal, so the click target is not just the small circle.
+            payload = esc(json.dumps(modal))
+            group_open = (f'<g class="playermark" role="button" tabindex="0" '
+                         f'aria-label="{esc(modal.get("name", ""))} stats" '
+                         f'data-player=\'{payload}\'>')
+
+        parts.append(group_open)
         parts.append(f'<circle class="{cls}" cx="{x:.1f}" cy="{y:.1f}" r="11" '
                      f'data-tip="{esc(tip)}"/>')
         parts.append(f'<text class="pnum" x="{x:.1f}" y="{y + 3.5:.1f}" '
                      f'text-anchor="middle">{esc(player.get("short", "")[:3])}</text>')
         parts.append(f'<text class="pname" x="{x:.1f}" y="{y + 23:.1f}" '
                      f'text-anchor="middle">{esc(player.get("name", "")[:12])}</text>')
+        parts.append(group_close)
 
     parts.append("</svg>")
     return "".join(parts)

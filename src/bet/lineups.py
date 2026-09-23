@@ -108,6 +108,32 @@ def recency_weights(kickoffs, as_of: datetime,
     return np.exp(-np.log(2.0) * age_days / half_life_days)
 
 
+def _team_history(store, team_id: str, as_of: datetime, *,
+                  lookback_days: int = 180) -> tuple[pd.DataFrame, bool]:
+    """This team's own per-match lines, widening the lookback when the normal
+    window has nothing for this team at all.
+
+    Recency weighting already fades an old match on its own -- a hard cutoff
+    discarding everything older than `lookback_days` should not have to do
+    that job again. Applied unconditionally, though, it turns "this team's
+    last recorded match was 200 days ago" into "no history at all", which
+    produces a shapeless, 0%-confidence guess and an empty predicted XI when
+    the honest worst case is "assume they set up the same way they last did".
+
+    Returns the squad's rows (possibly from beyond the normal window) and
+    whether the fallback had to be used at all.
+    """
+    since = as_of - timedelta(days=lookback_days)
+    stats = store.player_stats_as_of(as_of, since=since)
+    squad = stats[stats["team_id"] == team_id].copy() if not stats.empty else stats
+    if not squad.empty:
+        return squad, False
+
+    stats = store.player_stats_as_of(as_of)          # unbounded
+    squad = stats[stats["team_id"] == team_id].copy() if not stats.empty else stats
+    return squad, not squad.empty
+
+
 def start_propensity(store, team_id: str, as_of: datetime, *,
                      lookback_days: int = 180,
                      half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> pd.DataFrame:
@@ -118,13 +144,7 @@ def start_propensity(store, team_id: str, as_of: datetime, *,
     match, so his propensity collapses regardless of how much he played earlier
     in the season.
     """
-    since = as_of - timedelta(days=lookback_days)
-    stats = store.player_stats_as_of(as_of, since=since)
-    if stats.empty:
-        return pd.DataFrame(columns=["player_id", "propensity", "position",
-                                     "days_since_start", "appearances"])
-
-    squad = stats[stats["team_id"] == team_id].copy()
+    squad, _ = _team_history(store, team_id, as_of, lookback_days=lookback_days)
     if squad.empty:
         return pd.DataFrame(columns=["player_id", "propensity", "position",
                                      "days_since_start", "appearances"])
@@ -193,12 +213,8 @@ def predict_formation(store, team_id: str, as_of: datetime, *,
     names the same team every week, high for one who does not. It is the honest
     measure of how far to trust any predicted XI.
     """
-    since = as_of - timedelta(days=lookback_days)
-    stats = store.player_stats_as_of(as_of, since=since)
-    if stats.empty:
-        return DEFAULT_FORMATION, 0.0, 0.0
-
-    squad = stats[(stats["team_id"] == team_id) & (stats["started"].fillna(False))].copy()
+    squad, _ = _team_history(store, team_id, as_of, lookback_days=lookback_days)
+    squad = squad[squad["started"].fillna(False)].copy() if not squad.empty else squad
     if squad.empty:
         return DEFAULT_FORMATION, 0.0, 0.0
 
@@ -279,6 +295,19 @@ def predict_lineup(store, team_id: str, as_of: datetime, *,
     if propensity.empty:
         lineup.notes.append("no recent appearance data; no XI predicted")
         return lineup
+
+    # `start_propensity`/`predict_formation` already widened their own search
+    # when the normal window had nothing for this team; this just checks
+    # whether that happened, so the prediction says plainly that it is
+    # standing on an old match rather than reporting a number with no context.
+    _, used_fallback = _team_history(store, team_id, as_of, lookback_days=lookback_days)
+    if used_fallback:
+        stale_days = int(propensity["days_since_start"].max()) \
+            if propensity["days_since_start"].notna().any() else None
+        lineup.notes.append(
+            f"no appearance data in the last {lookback_days} days -- predicted from "
+            + (f"a match {stale_days}d ago" if stale_days is not None else "older history")
+            + "; treat this XI as a weak guess")
 
     available = propensity.copy()
     if absences:
