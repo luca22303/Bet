@@ -665,3 +665,75 @@ def test_each_matchs_subtabs_have_unique_ids(store_with_players):
     page = build(store_with_players, datetime(2024, 1, 5), days=8)
     ids = re.findall(r'id="([\w-]+-formation)"', page)
     assert len(ids) == len(set(ids)), "duplicate sub-tab ids across fixtures"
+
+
+def test_a_finished_match_in_an_unfinished_round_is_not_shown_twice(store):
+    """The reported bug: the same 'No player data for X and Y' message
+    appeared twice on the page. Friday's match, already finished, was being
+    claimed by both the current-round view and the previous-matchday panel
+    at once, because the previous-matchday lookup could not see that
+    Saturday's fixture in the same round had not been played yet."""
+    import numpy as np
+
+    from conftest import generate_season
+
+    store.init_schema()
+    rng = np.random.default_rng(12)
+    matches, results, quotes = generate_season(
+        datetime(2022, 8, 10, 15, 30), "2022-23", rng)
+    store.upsert("match", matches, ["match_id"])
+    store.upsert("match_result", results, ["match_id", "source"])
+    store.upsert("odds_quote", quotes,
+                 ["match_id", "book", "market", "selection", "quoted_at"])
+
+    friday = datetime(2024, 9, 20, 18, 30)
+    saturday = friday + timedelta(hours=20)
+    as_of = friday + timedelta(hours=3)
+
+    store.upsert("match", pd.DataFrame([
+        {"match_id": "friday", "source": "t", "league": "bundesliga",
+         "season": "2024-25", "kickoff_utc": friday,
+         "home_team_id": "borussia_dortmund", "away_team_id": "sv_werder_bremen",
+         "known_at": friday - timedelta(days=30)},
+        {"match_id": "saturday", "source": "t", "league": "bundesliga",
+         "season": "2024-25", "kickoff_utc": saturday,
+         "home_team_id": "bayern_munich", "away_team_id": "rb_leipzig",
+         "known_at": saturday - timedelta(days=30)},
+    ]), ["match_id"])
+    store.upsert("match_result", pd.DataFrame([{
+        "match_id": "friday", "source": "t", "home_goals": 2, "away_goals": 0,
+        "outcome": "H", "ht_home": 1, "ht_away": 0,
+        "known_at": friday + timedelta(hours=2),
+    }]), ["match_id", "source"])
+
+    page = build(store, as_of, days=8, include_quality=False)
+    # Dortmund vs Bremen exists exactly once. Before the fix it was claimed by
+    # both the current round and the previous-matchday panel at once.
+    assert page.count("vs</span> Werder Bremen") == 1
+    # The round is not finished (Saturday has not been played), so there is
+    # no previous matchday yet at all.
+    assert '<details class="history">' not in page
+
+
+def test_scorelines_still_render_with_no_player_data_at_all(store):
+    """The early return that produced the previous bug also threw away
+    Scorelines and every other model-derived number, which needs no player
+    data at all -- 'nothing is visible, no data at all, no match details'."""
+    import numpy as np
+
+    from conftest import generate_season
+
+    store.init_schema()
+    rng = np.random.default_rng(13)
+    matches, results, quotes = generate_season(
+        datetime(2023, 8, 10, 15, 30), "2023-24", rng)
+    store.upsert("match", matches, ["match_id"])
+    store.upsert("match_result", results, ["match_id", "source"])
+    store.upsert("odds_quote", quotes,
+                 ["match_id", "book", "market", "selection", "quoted_at"])
+    # No player data at all -- the exact reported situation.
+
+    page = build(store, datetime(2024, 1, 5), days=8, include_quality=False)
+    assert "No player data for" in page
+    assert "Scorelines" in page
+    assert 'class="subnav"' in page      # the tabs are still there

@@ -147,3 +147,68 @@ def test_next_matchday_does_not_merge_in_the_actually_previous_round(store):
     fixtures = next_matchday(store, as_of, league="bundesliga")
     assert set(fixtures["match_id"]) == {"friday", "saturday"}
     assert "last_week" not in set(fixtures["match_id"])
+
+
+def test_previous_matchday_skips_a_round_still_in_progress(store):
+    """A round is a weekend: Friday's match can finish while Saturday's has
+    not even kicked off. Clustering only played rows made that Friday match
+    look like a complete previous matchday on its own -- the same fixture
+    `next_matchday` was already, correctly, showing as part of the round
+    still under way. One match rendered on both, identically."""
+    store.init_schema()
+    friday = datetime(2024, 9, 20, 18, 30)
+    saturday = friday + timedelta(hours=20)
+    as_of = friday + timedelta(hours=3)          # Friday finished, Saturday has not
+
+    store.upsert("match", pd.DataFrame([
+        {"match_id": "friday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": friday, "home_team_id": "a", "away_team_id": "b",
+         "known_at": friday - timedelta(days=30)},
+        {"match_id": "saturday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": saturday, "home_team_id": "c", "away_team_id": "d",
+         "known_at": saturday - timedelta(days=30)},
+    ]), ["match_id"])
+    store.upsert("match_result", pd.DataFrame([{
+        "match_id": "friday", "source": "t", "home_goals": 2, "away_goals": 0,
+        "outcome": "H", "ht_home": 1, "ht_away": 0,
+        "known_at": friday + timedelta(hours=2),
+    }]), ["match_id", "source"])
+
+    assert previous_matchday(store, as_of, league="bundesliga").empty
+    # It still belongs to the current round, exactly where it was before.
+    assert set(next_matchday(store, as_of, league="bundesliga")["match_id"]) == {"friday", "saturday"}
+
+
+def test_previous_matchday_is_available_once_the_whole_round_finishes(store):
+    """The moment the last fixture in a round gets a result, that whole round
+    -- not just the fixture that just finished -- becomes 'the previous
+    matchday', and the next round takes over as 'the next matchday'."""
+    store.init_schema()
+    friday = datetime(2024, 9, 20, 18, 30)
+    saturday = friday + timedelta(hours=20)
+    next_friday = friday + timedelta(days=7)
+    as_of = saturday + timedelta(hours=3)        # both fixtures now finished
+
+    store.upsert("match", pd.DataFrame([
+        {"match_id": "friday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": friday, "home_team_id": "a", "away_team_id": "b",
+         "known_at": friday - timedelta(days=30)},
+        {"match_id": "saturday", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": saturday, "home_team_id": "c", "away_team_id": "d",
+         "known_at": saturday - timedelta(days=30)},
+        {"match_id": "next_week", "source": "t", "league": "bundesliga", "season": "2024-25",
+         "kickoff_utc": next_friday, "home_team_id": "a", "away_team_id": "c",
+         "known_at": next_friday - timedelta(days=30)},
+    ]), ["match_id"])
+    store.upsert("match_result", pd.DataFrame([
+        {"match_id": "friday", "source": "t", "home_goals": 2, "away_goals": 0,
+         "outcome": "H", "ht_home": 1, "ht_away": 0, "known_at": friday + timedelta(hours=2)},
+        {"match_id": "saturday", "source": "t", "home_goals": 1, "away_goals": 1,
+         "outcome": "D", "ht_home": 0, "ht_away": 1, "known_at": saturday + timedelta(hours=2)},
+    ]), ["match_id", "source"])
+
+    previous = previous_matchday(store, as_of, league="bundesliga")
+    nxt = next_matchday(store, as_of, league="bundesliga")
+    assert set(previous["match_id"]) == {"friday", "saturday"}
+    assert set(nxt["match_id"]) == {"next_week"}
+    assert set(previous["match_id"]).isdisjoint(set(nxt["match_id"]))

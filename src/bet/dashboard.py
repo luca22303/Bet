@@ -830,17 +830,14 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
     no_data_sides = [side for side in ("home", "away")
                      if detail["squads"].get(side)
                      and not detail["squads"][side]["players"]]
-    have_data_sides = [side for side in ("home", "away")
-                      if detail["squads"].get(side) and detail["squads"][side]["players"]]
 
-    if no_data_sides and not have_data_sides:
-        names = " and ".join(esc(_team(detail["squads"][s]["team_id"])) for s in no_data_sides)
-        parts.append(
-            '<div class="empty">No player data for '
-            f"{names}. Run <code>bet ingest --source fbref</code> to predict "
-            "line-ups and formations for this fixture.</div></div>")
-        return "".join(parts)
-
+    # No early return here even when neither side has any player data at
+    # all: the loop below already renders a plain "no data" box per side in
+    # that case, and Scorelines and the model's own numbers below need no
+    # player data whatsoever -- they come from the match model, not fbref.
+    # Returning early used to throw those away too, so a fixture with no
+    # lineups showed literally nothing on the page instead of what the model
+    # actually does know about it.
     uid = match.match_id.replace(":", "-")
 
     pitches = []
