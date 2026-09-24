@@ -182,6 +182,24 @@ CREATE TABLE IF NOT EXISTS player_match_stat (
     fouls               DOUBLE,
     yellow_cards        DOUBLE,
     red_cards           DOUBLE,
+    -- FBref's Shooting, Possession, Defensive Actions, Misc and Goalkeeper
+    -- tables. None on a row ingested before these existed, same as the
+    -- touch zones above -- "never ingested", not "a real zero".
+    avg_shot_distance    DOUBLE,   -- metres, converted from FBref's yards
+    dribbles_attempted   DOUBLE,
+    dribbles_completed   DOUBLE,
+    dribbles_tackled     DOUBLE,   -- dribble attempted, opponent won the ball
+    tackles_won          DOUBLE,
+    challenges_attempted DOUBLE,   -- tackle attempts specifically vs a dribble
+    challenges_lost      DOUBLE,   -- attempted, opponent beat the challenge
+    aerials_won          DOUBLE,
+    aerials_lost         DOUBLE,
+    fouls_drawn          DOUBLE,
+    recoveries           DOUBLE,
+    gk_shots_faced       DOUBLE,
+    gk_goals_against     DOUBLE,
+    gk_saves             DOUBLE,
+    gk_save_pct          DOUBLE,
     known_at            TIMESTAMP NOT NULL,
     PRIMARY KEY (match_id, player_id, source)
 );
@@ -263,6 +281,21 @@ ADDED_COLUMNS = (
     ("player_match_stat", "touches_mid_third", "DOUBLE"),
     ("player_match_stat", "touches_att_third", "DOUBLE"),
     ("player_match_stat", "touches_att_pen", "DOUBLE"),
+    ("player_match_stat", "avg_shot_distance", "DOUBLE"),
+    ("player_match_stat", "dribbles_attempted", "DOUBLE"),
+    ("player_match_stat", "dribbles_completed", "DOUBLE"),
+    ("player_match_stat", "dribbles_tackled", "DOUBLE"),
+    ("player_match_stat", "tackles_won", "DOUBLE"),
+    ("player_match_stat", "challenges_attempted", "DOUBLE"),
+    ("player_match_stat", "challenges_lost", "DOUBLE"),
+    ("player_match_stat", "aerials_won", "DOUBLE"),
+    ("player_match_stat", "aerials_lost", "DOUBLE"),
+    ("player_match_stat", "fouls_drawn", "DOUBLE"),
+    ("player_match_stat", "recoveries", "DOUBLE"),
+    ("player_match_stat", "gk_shots_faced", "DOUBLE"),
+    ("player_match_stat", "gk_goals_against", "DOUBLE"),
+    ("player_match_stat", "gk_saves", "DOUBLE"),
+    ("player_match_stat", "gk_save_pct", "DOUBLE"),
 )
 
 MIGRATIONS = "\n".join(

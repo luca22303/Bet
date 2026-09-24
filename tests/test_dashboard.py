@@ -594,6 +594,9 @@ def test_player_modal_shows_the_real_box_score_for_a_played_match():
 
 
 def test_player_modal_notes_missing_keeper_stats_rather_than_faking_them():
+    """A box score without the goalkeeper table's own fields (an older
+    ingest, or a match it was never parsed for) must say so, not show
+    nothing with no explanation."""
     from bet.dashboard import _player_modal
 
     modal = _player_modal(
@@ -602,7 +605,83 @@ def test_player_modal_notes_missing_keeper_stats_rather_than_faking_them():
 
     rows = dict(modal["rows"])
     assert "Shots" not in rows           # not a keeper stat
-    assert "saves" in modal["note"].lower()
+    assert "Saves" not in rows
+    assert "not ingested" in modal["note"].lower()
+
+
+def test_player_modal_shows_real_keeper_stats_when_ingested():
+    from bet.dashboard import _player_modal
+
+    modal = _player_modal(
+        "gk1", "Neuer", "Bayern", "goalkeeper", "GK", 1.0, 0,
+        {"minutes": 90, "goals": 0, "assists": 0, "gk_shots_faced": 6,
+         "gk_goals_against": 1, "gk_saves": 5, "gk_save_pct": 83.3}, played=True)
+
+    rows = dict(modal["rows"])
+    assert rows["Shots faced"] == "6"
+    assert rows["Goals conceded"] == "1"
+    assert rows["Saves"] == "5"
+    assert rows["Save %"] == "83.3%"
+    assert modal["note"] == ""
+
+
+def test_player_modal_shows_the_richer_outfield_stats_when_present():
+    from bet.dashboard import _player_modal
+
+    modal = _player_modal(
+        "p1", "Kimmich", "Bayern", "midfielder", "MF", 1.0, 0,
+        {"minutes": 90, "goals": 0, "assists": 1, "shots": 2, "shots_on_target": 1,
+         "avg_shot_distance": 18.288, "xg": 0.15, "dribbles_attempted": 4,
+         "dribbles_completed": 3, "tackles": 3, "tackles_won": 2, "interceptions": 1,
+         "aerials_won": 2, "aerials_lost": 1, "fouls_drawn": 2}, played=True)
+
+    rows = dict(modal["rows"])
+    assert rows["Avg shot distance"] == "18.3m"
+    assert rows["Dribbles"] == "3/4"
+    assert rows["Tackles"] == "3 (2 won)"
+    assert rows["Aerials won"] == "2/3"
+    assert rows["Fouls drawn"] == "2"
+
+
+def test_player_modal_skips_richer_stats_never_ingested_for_this_row():
+    """A box score predating these columns must not show fabricated zeroes."""
+    from bet.dashboard import _player_modal
+
+    modal = _player_modal(
+        "p1", "Kimmich", "Bayern", "midfielder", "MF", 1.0, 0,
+        {"minutes": 90, "goals": 0, "assists": 0, "shots": 1}, played=True)
+
+    rows = dict(modal["rows"])
+    assert "Avg shot distance" not in rows
+    assert "Dribbles" not in rows
+    assert "Aerials won" not in rows
+    assert "Fouls drawn" not in rows
+
+
+def test_team_richer_tiles_aggregate_across_the_squad():
+    from bet.dashboard import _team_richer_tiles
+
+    rows = pd.DataFrame({
+        "shots": [3, 1], "avg_shot_distance": [18.0, 12.0],
+        "dribbles_completed": [2, 1], "dribbles_attempted": [3, 2],
+        "tackles_won": [2, 1], "aerials_won": [3, 0], "aerials_lost": [1, 0],
+        "gk_saves": [None, 4], "gk_goals_against": [None, 1],
+    })
+    html = _team_richer_tiles(rows)
+    assert "dribbles completed" in html
+    assert "3/5" in html                     # 2+1 completed of 3+2 attempted
+    assert "tackles won" in html
+    assert "goalkeeper saves" in html
+    assert "1 conceded" in html
+    # Weighted by shots: (18*3 + 12*1) / 4 = 16.5
+    assert "16.5m" in html
+
+
+def test_team_richer_tiles_blank_when_never_ingested():
+    from bet.dashboard import _team_richer_tiles
+
+    assert _team_richer_tiles(pd.DataFrame()) == ""
+    assert _team_richer_tiles(pd.DataFrame({"other": [1, 2]})) == ""
 
 
 def test_player_modal_on_an_upcoming_fixture_shows_context_not_a_fake_score():

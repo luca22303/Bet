@@ -93,3 +93,58 @@ def test_touch_zone_headers_flatten_and_map_to_real_columns():
         assert flattened in COLUMN_MAP, flattened
         assert COLUMN_MAP[flattened] in TOUCH_ZONE_COLUMNS
         assert COLUMN_MAP[flattened] in NUMERIC_COLUMNS
+
+
+@pytest.mark.parametrize("groups,expected_columns", [
+    ([("", "Dist")], ["dist"]),
+    ([("Take-Ons", "Att"), ("Take-Ons", "Succ"), ("Take-Ons", "Tkld")],
+     ["take_ons_att", "take_ons_succ", "take_ons_tkld"]),
+    ([("Tackles", "TklW"), ("Challenges", "Att"), ("Challenges", "Lost")],
+     ["tackles_tklw", "challenges_att", "challenges_lost"]),
+    ([("Performance", "Fld"), ("Performance", "Recov")],
+     ["performance_fld", "performance_recov"]),
+    ([("Aerial Duels", "Won"), ("Aerial Duels", "Lost")],
+     ["aerial_duels_won", "aerial_duels_lost"]),
+    ([("Shot Stopping", "SoTA"), ("Shot Stopping", "GA"),
+      ("Shot Stopping", "Saves"), ("Shot Stopping", "Save%")],
+     ["shot_stopping_sota", "shot_stopping_ga",
+      "shot_stopping_saves", "shot_stopping_save%"]),
+])
+def test_richer_stat_headers_flatten_and_map_to_real_columns(groups, expected_columns):
+    """The shooting, possession, defensive-actions, misc and goalkeeper tables
+    all follow the same 'group prefix disambiguates' convention already
+    proven for the touch zones -- this just extends coverage to the next
+    batch of tables, so a wrong guess at a header name fails a test rather
+    than silently leaving a column null forever."""
+    from bet.ingest.fbref import NUMERIC_COLUMNS
+
+    columns_index = pd.MultiIndex.from_tuples(
+        [(upper or "Unnamed: 0_level_0", lower) for upper, lower in groups])
+    frame = pd.DataFrame([list(range(len(groups)))], columns=columns_index)
+    columns = list(flatten_columns(frame).columns)
+    assert columns == expected_columns
+
+    for flattened in columns:
+        assert flattened in COLUMN_MAP, flattened
+        assert COLUMN_MAP[flattened] in NUMERIC_COLUMNS
+
+
+def test_shot_distance_is_converted_from_yards_to_metres():
+    """FBref reports it in yards; the rest of this project's spatial code
+    (pitch.py) works in metres, so it must not leak the source unit."""
+    from bet.ingest.fbref import FBrefSource, YARDS_TO_METRES
+
+    record = {"avg_shot_distance": None}
+    row = pd.Series({"dist": "20.0"})
+    FBrefSource._merge_stats(record, ["dist"], row)
+    assert record["avg_shot_distance"] == pytest.approx(20.0 * YARDS_TO_METRES)
+
+
+def test_a_value_already_present_is_not_overwritten_by_a_later_table():
+    """First non-null wins, same rule as every other merged column."""
+    from bet.ingest.fbref import FBrefSource
+
+    record = {"avg_shot_distance": 15.0}
+    row = pd.Series({"dist": "99.0"})
+    FBrefSource._merge_stats(record, ["dist"], row)
+    assert record["avg_shot_distance"] == 15.0

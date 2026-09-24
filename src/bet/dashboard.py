@@ -385,33 +385,63 @@ def _player_modal(player_id: str, name: str, team: str, group: str, position: st
         if shares is not None:
             heatmap = zone_heatmap(shares, width=220, height=280, team_name=name)
 
-    if played and box_score:
         rows.append(("Minutes", _num(box_score.get("minutes")) or "0"))
         rows.append(("Goals", _num(box_score.get("goals")) or "0"))
         rows.append(("Assists", _num(box_score.get("assists")) or "0"))
-        if group != "goalkeeper":
+        if group == "goalkeeper":
+            faced = _num(box_score.get("gk_shots_faced"))
+            if faced is not None:
+                rows.append(("Shots faced", faced))
+            conceded = _num(box_score.get("gk_goals_against"))
+            if conceded is not None:
+                rows.append(("Goals conceded", conceded))
+            saves = _num(box_score.get("gk_saves"))
+            if saves is not None:
+                rows.append(("Saves", saves))
+            save_pct = _num(box_score.get("gk_save_pct"), 1)
+            if save_pct is not None:
+                rows.append(("Save %", f"{save_pct}%"))
+            note = ("" if saves is not None else
+                    "No goalkeeper-specific stats for this match yet -- FBref's "
+                    "goalkeeper table was not ingested.")
+        else:
             shots = _num(box_score.get("shots"))
             if shots is not None:
                 rows.append(("Shots", shots))
             sot = _num(box_score.get("shots_on_target"))
             if sot is not None:
                 rows.append(("Shots on target", sot))
+            dist = _num(box_score.get("avg_shot_distance"), 1)
+            if dist is not None:
+                rows.append(("Avg shot distance", f"{dist}m"))
             xg = _num(box_score.get("xg"), 2)
             if xg is not None:
                 rows.append(("xG", xg))
+            attempted = box_score.get("dribbles_attempted")
+            if attempted is not None and not pd.isna(attempted):
+                completed = box_score.get("dribbles_completed") or 0
+                rows.append(("Dribbles", f"{completed:.0f}/{attempted:.0f}"))
             tackles = _num(box_score.get("tackles"))
             if tackles is not None:
-                rows.append(("Tackles", tackles))
+                won = box_score.get("tackles_won")
+                rows.append(("Tackles", f"{tackles} ({won:.0f} won)"
+                             if won is not None and not pd.isna(won) else tackles))
             interceptions = _num(box_score.get("interceptions"))
             if interceptions is not None:
                 rows.append(("Interceptions", interceptions))
+            aerial_won = box_score.get("aerials_won")
+            aerial_lost = box_score.get("aerials_lost")
+            if aerial_won is not None and not pd.isna(aerial_won):
+                total = aerial_won + (aerial_lost or 0)
+                rows.append(("Aerials won", f"{aerial_won:.0f}/{total:.0f}"))
+            fouls_drawn = _num(box_score.get("fouls_drawn"))
+            if fouls_drawn is not None:
+                rows.append(("Fouls drawn", fouls_drawn))
+            note = ""
         yellow = box_score.get("yellow_cards") or 0
         red = box_score.get("red_cards") or 0
         if yellow or red:
             rows.append(("Cards", f"{int(yellow)} yellow" + (f", {int(red)} red" if red else "")))
-        note = ("No goalkeeper-specific stats (saves, goals conceded) yet -- "
-                "FBref publishes them in a separate table this parser does not "
-                "read." if group == "goalkeeper" else "")
     elif played:
         rows.append(("Minutes", "0"))
         note = "Named in the squad but did not play, per the source ingested."
@@ -587,6 +617,7 @@ def build_match_detail(store, model, match, as_of: datetime,
             "bench": bench,
             "absent": sorted(absent),
             "touch_shares": touch_shares,
+            "match_rows": side_rows,
         }
 
     return detail
@@ -652,6 +683,63 @@ def _bench_list(bench: list[dict]) -> str:
                      f'<span class="kick">{share}</span></span>')
     return ('<div class="meta" style="margin-top:7px"><span class="kick">bench:</span> '
             + " &middot; ".join(items) + "</div>")
+
+
+def _team_total(rows: pd.DataFrame, column: str) -> float | None:
+    """Sum of a column across a team's rows, or `None` if never ingested.
+
+    Same rule as `touch_zone_shares`: every value null means this team was
+    never covered by the table that carries it, which must read differently
+    from a team that simply recorded a real zero.
+    """
+    if rows.empty or column not in rows.columns or rows[column].isna().all():
+        return None
+    return float(rows[column].fillna(0.0).sum())
+
+
+def _team_richer_tiles(rows: pd.DataFrame) -> str:
+    """A team's actual match totals for the newer FBref tables.
+
+    One row of tiles per side, next to the per-90 table below it -- this is
+    what actually happened in the match, the per-90 table is the rolling rate
+    a prediction would have used going in. Blank for a match this data was
+    never ingested for, rather than a row of zeroes.
+    """
+    tiles = []
+
+    shots = _team_total(rows, "shots")
+    if "avg_shot_distance" in rows.columns and rows["avg_shot_distance"].notna().any():
+        dist_rows = rows[rows["avg_shot_distance"].notna()]
+        weight = dist_rows["shots"].fillna(0.0) if "shots" in dist_rows.columns else None
+        if weight is not None and weight.sum() > 0:
+            avg_dist = float((dist_rows["avg_shot_distance"] * weight).sum() / weight.sum())
+            tiles.append(stat_tile(f"{avg_dist:.1f}m", "avg shot distance",
+                                   detail=f"from {shots:.0f} shots" if shots else ""))
+
+    completed, attempted = (_team_total(rows, "dribbles_completed"),
+                            _team_total(rows, "dribbles_attempted"))
+    if attempted:
+        tiles.append(stat_tile(f"{completed:.0f}/{attempted:.0f}", "dribbles completed"))
+
+    tackles_won = _team_total(rows, "tackles_won")
+    if tackles_won is not None:
+        tiles.append(stat_tile(f"{tackles_won:.0f}", "tackles won"))
+
+    aerial_won, aerial_lost = _team_total(rows, "aerials_won"), _team_total(rows, "aerials_lost")
+    if aerial_won is not None:
+        contested = aerial_won + (aerial_lost or 0.0)
+        detail = f"{aerial_won / contested:.0%} of {contested:.0f} contested" if contested else ""
+        tiles.append(stat_tile(f"{aerial_won:.0f}", "aerials won", detail=detail))
+
+    saves = _team_total(rows, "gk_saves")
+    if saves is not None:
+        conceded = _team_total(rows, "gk_goals_against")
+        detail = f"{conceded:.0f} conceded" if conceded is not None else ""
+        tiles.append(stat_tile(f"{saves:.0f}", "goalkeeper saves", detail=detail))
+
+    if not tiles:
+        return ""
+    return f'<div class="tiles" style="margin:4px 0 10px">{"".join(tiles)}</div>'
 
 
 # -------------------------------------------------------------------- views
@@ -980,6 +1068,7 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
                   f"</span></div>") if squad["absent"] else ""
         squad_tables.append(
             f'<h3 style="margin-top:12px">{esc(_team(squad["team_id"]))}</h3>'
+            + _team_richer_tiles(squad["match_rows"])
             + _player_table(squad["players"]) + _bench_list(squad["bench"]) + absent
             + '<div class="caption">Per-90 rates use the last 18 months, shrunk '
               "toward the squad mean by minutes played. <b>last</b> is days since "

@@ -274,6 +274,38 @@ def test_init_schema_removes_indexes_an_older_version_created(tmp_path):
         assert "idx_odds_match" not in _index_names(upgraded)
 
 
+def test_added_columns_are_restored_on_a_table_missing_them(tmp_path):
+    """Every entry in schema.ADDED_COLUMNS exists so a store created before
+    that column shipped still gains it -- otherwise a database ingested
+    months ago silently keeps a field null forever with no error explaining
+    why, e.g. the heatmap or the richer-stats tab staying empty.
+
+    Runs the whole list generically rather than naming one column, so this
+    keeps covering the mechanism itself as more columns are added to it.
+    """
+    from bet.store import Store
+    from bet.store.schema import ADDED_COLUMNS
+
+    db = tmp_path / "predates_added_columns.duckdb"
+    with Store.open(db) as legacy:
+        legacy.init_schema()
+        for table, column, _ in ADDED_COLUMNS:
+            legacy.con.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        existing = {row[0] for row in legacy.con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'player_match_stat'").fetchall()}
+        assert not existing & {c for t, c, _ in ADDED_COLUMNS if t == "player_match_stat"}
+
+    with Store.open(db) as upgraded:
+        upgraded.init_schema()
+        restored = {row[0] for row in upgraded.con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'player_match_stat'").fetchall()}
+        for table, column, _ in ADDED_COLUMNS:
+            if table == "player_match_stat":
+                assert column in restored, column
+
+
 def test_upserting_over_a_legacy_index_still_works(tmp_path):
     """The repair has to happen before the write that would hit the index."""
     from bet.store import Store

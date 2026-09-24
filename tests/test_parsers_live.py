@@ -151,6 +151,36 @@ def test_missing_parser_backend_is_loud_not_silent():
     assert "except (ValueError, ImportError)" not in inspect.getsource(fbref)
 
 
+def test_a_tfoot_does_not_shift_every_row_ids_extraction(store):
+    """`frame` is parsed with the tfoot already dropped, so its row count no
+    longer includes FBref's totals row -- matching player ids against <tr>
+    blocks taken from the raw, tfoot-including HTML shifted every row by one,
+    with the tfoot's own row wrongly claimed as the last player's. Invisible
+    before because every table on a page carries a tfoot, so two tables for
+    the same players were shifted identically and still merged by accident;
+    a table without one (like the goalkeeper table below) breaks that."""
+    from bet.ingest.base import IngestResult
+    from bet.ingest.fbref import FBrefSource
+
+    page = ("<html><head><title>Bayern Munich vs Wolfsburg Match Report | FBref"
+            "</title></head><body>"
+            '<span class="venuetime" data-venue-epoch="1724510400"></span>'
+            + _player_table("stats_abc12345_summary", "BAY", count=3)
+            + _player_table("stats_def67890_summary", "WOL", count=3)
+            + "</body></html>")
+
+    source = FBrefSource(store, raw_dir="/tmp", delay=0)
+    _, stats = source._parse_match_page(
+        page, "bundesliga", "2024-25", IngestResult(source="fbref"))
+
+    bay = [s for s in stats if s["team_id"] == "bayern_munich"]
+    assert len(bay) == 3
+    # A stable fbref: id on every player, none of them a name-slug fallback --
+    # the tell that a row's link got claimed by the tfoot's totals row instead.
+    assert all(s["player_id"].startswith("fbref:") for s in bay)
+    assert len({s["player_id"] for s in bay}) == 3
+
+
 def test_squad_key_groups_by_hash_then_by_position():
     assert squad_key("stats_abc12345_summary", 0) == "abc12345"
     assert squad_key("stats_abc12345_passing", 3) == "abc12345"
@@ -375,6 +405,113 @@ def test_the_possession_tables_zone_touches_merge_into_the_summary_row(store):
     # The total from the possession table's own "Touches" column agrees with
     # whichever table supplied it first, rather than the two disagreeing.
     assert bay_gk["touches"] is not None
+
+
+def _shooting_table(table_id, prefix, count=12):
+    """Shot volume plus average distance -- ungrouped on the match-report
+    version of this table, matching the bare 'dist' entry in COLUMN_MAP."""
+    rows = "".join(
+        f'<tr><th><a href="/en/players/{abs(hash(prefix)) % 0xffff:04x}{i:04x}/x">'
+        f'{prefix} P{i}</a></th><td>90</td><td>{i % 3}</td><td>{2 + i}</td>'
+        f"<td>{1 + i}</td><td>{16.5 + i:.1f}</td></tr>"
+        for i in range(count))
+    attr = f' id="{table_id}"' if table_id else ""
+    return (f"<table{attr}><thead>"
+            "<tr><th>Player</th><th>Min</th><th>Gls</th><th>Sh</th>"
+            "<th>SoT</th><th>Dist</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>")
+
+
+def _defense_table(table_id, prefix, count=12):
+    """Defensive Actions table: Tackles (Tkl, TklW) and Challenges (Att, Lost)."""
+    rows = "".join(
+        f'<tr><th><a href="/en/players/{abs(hash(prefix)) % 0xffff:04x}{i:04x}/x">'
+        f'{prefix} P{i}</a></th><td>90</td><td>{1 + i}</td><td>{i}</td>'
+        f"<td>{2 + i}</td><td>{1 if i % 2 else 0}</td></tr>"
+        for i in range(count))
+    attr = f' id="{table_id}"' if table_id else ""
+    return (f"<table{attr}><thead>"
+            '<tr><th colspan="2"></th><th colspan="2">Tackles</th>'
+            '<th colspan="2">Challenges</th></tr>'
+            "<tr><th>Player</th><th>Min</th><th>Tkl</th><th>TklW</th>"
+            "<th>Att</th><th>Lost</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>")
+
+
+def _misc_table(table_id, prefix, count=12):
+    """Miscellaneous Stats table: Performance (Fld, Recov) and Aerial Duels."""
+    rows = "".join(
+        f'<tr><th><a href="/en/players/{abs(hash(prefix)) % 0xffff:04x}{i:04x}/x">'
+        f'{prefix} P{i}</a></th><td>90</td><td>{i}</td><td>{3 + i}</td>'
+        f"<td>{1 + i % 4}</td><td>{i % 2}</td></tr>"
+        for i in range(count))
+    attr = f' id="{table_id}"' if table_id else ""
+    return (f"<table{attr}><thead>"
+            '<tr><th colspan="2"></th><th colspan="2">Performance</th>'
+            '<th colspan="2">Aerial Duels</th></tr>'
+            "<tr><th>Player</th><th>Min</th><th>Fld</th><th>Recov</th>"
+            "<th>Won</th><th>Lost</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>")
+
+
+def _goalkeeper_table(table_id, prefix):
+    """Just the starting keeper (row 0 of `_player_table`'s own convention)."""
+    href = f'/en/players/{abs(hash(prefix)) % 0xffff:04x}0000/x'
+    attr = f' id="{table_id}"' if table_id else ""
+    return (f"<table{attr}><thead>"
+            '<tr><th colspan="2"></th><th colspan="4">Shot Stopping</th></tr>'
+            "<tr><th>Player</th><th>Min</th><th>SoTA</th><th>GA</th>"
+            "<th>Saves</th><th>Save%</th></tr></thead>"
+            f'<tbody><tr><th><a href="{href}">{prefix} P0</a></th>'
+            "<td>90</td><td>6</td><td>1</td><td>5</td><td>83.3</td></tr></tbody></table>")
+
+
+def test_richer_stat_tables_merge_into_the_same_records(store):
+    """The next batch of FBref tables -- shooting, defensive actions, misc,
+    goalkeeper -- read the same way the possession table already does: by
+    content, into records keyed by the player identity already established
+    from the summary table, never as a second set of phantom players."""
+    from bet.ingest.base import IngestResult
+    from bet.ingest.fbref import FBrefSource, YARDS_TO_METRES
+
+    page = ("<html><head><title>Bayern Munich vs Wolfsburg Match Report | FBref"
+            "</title></head><body>"
+            '<span class="venuetime" data-venue-epoch="1724510400"></span>'
+            + _player_table("stats_abc12345_summary", "BAY")
+            + _shooting_table("stats_abc12345_shooting", "BAY")
+            + _defense_table("stats_abc12345_defense", "BAY")
+            + _misc_table("stats_abc12345_misc", "BAY")
+            + _goalkeeper_table("keeper_stats_abc12345", "BAY")
+            + _player_table("stats_def67890_summary", "WOL")
+            + "</body></html>")
+
+    source = FBrefSource(store, raw_dir="/tmp", delay=0)
+    players, stats = source._parse_match_page(
+        page, "bundesliga", "2024-25", IngestResult(source="fbref"))
+
+    assert len(stats) == 24                        # still 12 a side, no doubling
+    bay = [s for s in stats if s["team_id"] == "bayern_munich"]
+    gk = next(s for s in bay if s["position"] == "GK")
+
+    # Row 0: Gls=0, Sh=2, SoT=1, Dist=16.5 yards.
+    striker = next(s for s in bay if s["avg_shot_distance"] is not None)
+    assert striker["avg_shot_distance"] == pytest.approx(16.5 * YARDS_TO_METRES, abs=0.01)
+
+    assert all(s["tackles_won"] is not None for s in bay)
+    assert all(s["challenges_attempted"] is not None for s in bay)
+    assert all(s["fouls_drawn"] is not None for s in bay)
+    assert all(s["recoveries"] is not None for s in bay)
+    assert all(s["aerials_won"] is not None for s in bay)
+
+    assert gk["gk_shots_faced"] == 6
+    assert gk["gk_goals_against"] == 1
+    assert gk["gk_saves"] == 5
+    assert gk["gk_save_pct"] == pytest.approx(83.3)
+
+    # The other side never saw these tables -- null, not zero.
+    wol = [s for s in stats if s["team_id"] == "vfl_wolfsburg"]
+    assert all(s["avg_shot_distance"] is None for s in wol)
+    assert all(s["gk_saves"] is None for s in wol)
 
 
 def test_a_page_without_a_possession_table_leaves_zone_touches_null(store):

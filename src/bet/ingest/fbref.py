@@ -82,6 +82,43 @@ COLUMN_MAP = {
     "touches_mid_3rd": "touches_mid_third",
     "touches_att_3rd": "touches_att_third",
     "touches_att_pen": "touches_att_pen",
+    # Shooting table. "Dist" is ungrouped on the match-report version of this
+    # table in every page seen so far, but "standard_dist" is mapped too in
+    # case a future layout groups it under "Standard" like the season pages do.
+    "dist": "avg_shot_distance",
+    "standard_dist": "avg_shot_distance",
+    # Possession table's "Take-Ons" group -- also present, identically named,
+    # at the tail of the Summary table, so either fills this in.
+    "take_ons_att": "dribbles_attempted",
+    "take_ons_succ": "dribbles_completed",
+    "take_ons_tkld": "dribbles_tackled",
+    # Defensive Actions table: "Tackles" group's own TklW, and "Challenges" --
+    # tackle attempts specifically against a player taking someone on.
+    "tackles_tklw": "tackles_won",
+    "challenges_att": "challenges_attempted",
+    "challenges_lost": "challenges_lost",
+    # Miscellaneous Stats table: "Performance" repeats CrdY/CrdR/Fls from the
+    # summary (harmless, first-non-null-wins) and adds Fld and Recov; "Aerial
+    # Duels" is its own group.
+    "performance_fld": "fouls_drawn",
+    "performance_recov": "recoveries",
+    "performance_tklw": "tackles_won",
+    "aerial_duels_won": "aerials_won",
+    "aerial_duels_lost": "aerials_lost",
+    # The goalkeeper table's "Shot Stopping" group.
+    "shot_stopping_sota": "gk_shots_faced",
+    "shot_stopping_ga": "gk_goals_against",
+    "shot_stopping_saves": "gk_saves",
+    "shot_stopping_save%": "gk_save_pct",
+}
+
+# FBref reports shot distance in yards; the rest of this project (pitch.py's
+# shot geometry) works in metres, so it is converted once here rather than
+# carrying mixed units into the schema.
+YARDS_TO_METRES = 0.9144
+
+COLUMN_TRANSFORMS = {
+    "avg_shot_distance": lambda value: value * YARDS_TO_METRES,
 }
 
 # The zone columns, listed separately from NUMERIC_COLUMNS below: a heatmap
@@ -98,6 +135,10 @@ NUMERIC_COLUMNS = [
     "passes_completed", "passes_attempted", "progressive_passes", "touches",
     "carries", "tackles", "interceptions", "blocks", "fouls",
     "yellow_cards", "red_cards", *TOUCH_ZONE_COLUMNS,
+    "avg_shot_distance", "dribbles_attempted", "dribbles_completed", "dribbles_tackled",
+    "tackles_won", "challenges_attempted", "challenges_lost", "aerials_won",
+    "aerials_lost", "fouls_drawn", "recoveries",
+    "gk_shots_faced", "gk_goals_against", "gk_saves", "gk_save_pct",
 ]
 
 
@@ -163,7 +204,8 @@ def looks_like_player_table(frame: pd.DataFrame) -> bool:
     if "player" not in columns:
         return False
     return bool(columns & {"min", "minutes", "performance_gls", "performance_sh",
-                           "expected_xg", "passes_cmp", "tackles_tkl", "sh", "gls"})
+                           "expected_xg", "passes_cmp", "tackles_tkl", "sh", "gls",
+                           "shot_stopping_saves"})
 
 
 # Rows that are summaries rather than players. The numeric form ("17 Players")
@@ -417,7 +459,17 @@ class FBrefSource(Source):
             except ValueError:
                 continue
 
-            row_blocks = re.findall(r"<tr\b[^>]*>.*?</tr>", table_html, re.DOTALL)
+            # `frame` was parsed with the <tfoot> already dropped (`_read_table`
+            # does this before handing pandas the HTML), so its row count no
+            # longer includes FBref's "N Players" totals row. Matching against
+            # row_blocks taken from the *raw* table_html would silently shift
+            # every row by one whenever a tfoot is present -- its <tr> is the
+            # last one in that list, displacing the true last data row out of
+            # the tail slice this line takes. That shift went unnoticed because
+            # every table on a match page carries a tfoot, so two tables for
+            # the same players were shifted identically and still merged into
+            # the same records by accident.
+            row_blocks = re.findall(r"<tr\b[^>]*>.*?</tr>", drop_footer(table_html), re.DOTALL)
             # Header rows come first, so data rows are the tail of the list.
             data_rows = row_blocks[-len(frame):] if len(row_blocks) >= len(frame) else row_blocks
 
@@ -470,6 +522,9 @@ class FBrefSource(Source):
             else:
                 number = pd.to_numeric(value, errors="coerce")
                 parsed = None if pd.isna(number) else float(number)
+                transform = COLUMN_TRANSFORMS.get(target)
+                if transform and parsed is not None:
+                    parsed = transform(parsed)
             if parsed is not None and record.get(target) is None:
                 record[target] = parsed
 
