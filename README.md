@@ -100,8 +100,8 @@ All free, no API keys.
 | ClubElo | cross-division power ratings | supplies the prior for promoted sides, which results-only models get badly wrong |
 | Understat | shot-level xG | converges far faster than goals on a 306-match season |
 | OpenLigaDB | fixtures, results, matchday structure | a plain public API, no scraping grey area |
-| FBref | per-match player lines (shots, xG, tackles, cards, minutes) | match pages, not season totals — see below |
-| kicker.de | predicted and confirmed XIs | forward-looking only; historical XIs come free from FBref |
+| FBref | per-match player lines (shots, xG, passing, tackles, cards, minutes, shot distance, dribbles, aerials, GK saves) | match pages, not season totals — see below |
+| kicker.de | predicted and confirmed XIs, live match ticker | forward-looking only; historical XIs come free from FBref |
 
 football-data.co.uk also carries **shots, shots on target, corners, fouls and
 cards** per match, in the same CSVs already downloaded for results and odds.
@@ -475,8 +475,12 @@ Closing line value converges in weeks instead of years.
 
 - Live odds ingestion and +EV alerting
 - A scheduler — `bet watch` is one polling pass, meant for cron
-- Line-up *fetching* — the T-60 workflow and the kicker parser exist, but the
-  parser is unverified against live HTML (see below)
+- Line-up and ticker *fetching* — the T-60 workflow, the kicker line-up
+  parser and the live-ticker parser all exist, but neither parser is
+  verified against live HTML (see below), and neither is wired into
+  `bet ingest`: both need a per-fixture URL rather than a season crawl, so
+  they are called directly as `KickerSource(store).ingest(...)` /
+  `.ingest_ticker(...)`
 - Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
@@ -580,7 +584,8 @@ Expected risk on first contact, lowest to highest:
 | OpenLigaDB | low | documented JSON API |
 | Understat | medium | JSON embedded in a `<script>`; breaks if they restyle |
 | FBref | medium | parses on content, not ids — see below |
-| kicker | medium | three fallback strategies — see below |
+| kicker (line-ups) | medium | three fallback strategies — see below |
+| kicker (ticker) | medium | same three-tier approach, applied to the live event log — see below |
 
 ### What was done about the two risky ones
 
@@ -600,6 +605,17 @@ strategy that worked is reported, so a page that starts parsing differently is
 visible rather than silent. A formation is only accepted if its digits sum to
 ten outfield players — that's what stops "2-1" being read as a shape.
 
+**kicker's live ticker** uses the same three tiers against the match event
+log instead of the line-up: embedded JSON, class-attribute markup, then a
+generic scan for the near-universal "45'" minute marker any football ticker
+uses regardless of markup. Goals, cards, substitutions and kickoff/half/full
+time markers are classified from the event's own wording (checking the more
+specific pattern first, so an own goal or a missed penalty is not read as a
+plain goal just because "Tor"/"Elfmeter" appears in both). Unlike the
+line-up parser, an unresolved team or player never drops the event — it is a
+display-only feature nothing downstream reads, so the original text is kept
+either way.
+
 Two real bugs fell out of doing this. `pandas.read_html` needs `lxml`, which
 was never declared as a dependency — and the code caught `ImportError` alongside
 a malformed-table `ValueError`, so on any machine without it the FBref ingest
@@ -613,6 +629,7 @@ side.
 ```bash
 bet diagnose --source fbref --url https://fbref.com/en/matches/...
 bet diagnose --source kicker --file saved-page.html
+bet diagnose --source kicker_ticker --file saved-ticker-page.html
 ```
 
 It runs each parser step separately and reports what the page actually contains

@@ -133,6 +133,19 @@ nav button[aria-selected="true"] { color:var(--ink); border-bottom-color:var(--s
 .playermark { cursor:pointer; }
 .playermark:focus-visible circle.player { outline:2px solid var(--s1); outline-offset:2px; }
 
+.ticker { display:flex; flex-direction:column; gap:2px; max-height:440px; overflow-y:auto; }
+.tickerrow { display:flex; gap:10px; align-items:baseline; padding:6px 9px;
+  border-radius:6px; font-size:13px; border-left:3px solid transparent; }
+.tickerrow .minute { font-variant-numeric:tabular-nums; color:var(--muted);
+  min-width:34px; text-align:right; font-weight:600; flex-shrink:0; }
+.tickerrow .label { font-weight:600; margin-right:5px; }
+.tickerrow.home { border-left-color:var(--home); }
+.tickerrow.away { border-left-color:var(--away); }
+.tickerrow.goal .label, .tickerrow.own_goal .label, .tickerrow.penalty_goal .label
+  { color:var(--good); }
+.tickerrow.yellow_card .label { color:var(--warning); }
+.tickerrow.second_yellow .label, .tickerrow.red_card .label { color:var(--critical); }
+
 #player-modal-backdrop { position:fixed; inset:0; background:rgba(11,11,11,0.45);
   display:flex; align-items:center; justify-content:center; z-index:100; padding:16px; }
 #player-modal-backdrop[hidden] { display:none; }
@@ -535,6 +548,7 @@ def build_match_detail(store, model, match, as_of: datetime,
         "score": most_likely_score(matrix),
         "scorelines": top_scorelines(matrix),
         "squads": {},
+        "events": store.match_events_as_of(as_of, match.match_id),
     }
 
     # A played match has its own box score -- goals, assists, minutes actually
@@ -683,6 +697,47 @@ def _bench_list(bench: list[dict]) -> str:
                      f'<span class="kick">{share}</span></span>')
     return ('<div class="meta" style="margin-top:7px"><span class="kick">bench:</span> '
             + " &middot; ".join(items) + "</div>")
+
+
+_EVENT_LABELS = {
+    "kickoff": "Kick-off", "half_time": "Half-time", "full_time": "Full-time",
+    "goal": "Goal", "own_goal": "Own goal", "penalty_goal": "Penalty scored",
+    "penalty_missed": "Penalty missed", "yellow_card": "Yellow card",
+    "second_yellow": "2nd yellow", "red_card": "Red card",
+    "substitution": "Substitution", "var_review": "VAR review",
+}
+
+
+def _render_ticker(events: pd.DataFrame, home_team: str, away_team: str) -> str:
+    """The match's play-by-play log, oldest first.
+
+    `team_id`/`player_name` are best-effort -- see kicker.py's ticker parser
+    module docstring -- so a description is always shown even when neither
+    resolved, since the original text is still meaningful on its own.
+    """
+    if events.empty:
+        return ""
+
+    rows = []
+    for event in events.itertuples():
+        side = ("home" if event.team_id == home_team
+                else "away" if event.team_id == away_team else "")
+        minute = "" if event.minute is None or pd.isna(event.minute) else str(int(event.minute))
+        if minute and event.stoppage is not None and not pd.isna(event.stoppage):
+            minute += f"+{int(event.stoppage)}"
+
+        label = _EVENT_LABELS.get(event.event_type, "")
+        label_html = f'<span class="label">{esc(label)}</span>' if label else ""
+        player_name = event.player_name
+        who = (f"{esc(player_name)} &mdash; "
+               if player_name and not pd.isna(player_name) else "")
+
+        minute_html = f"{minute}&rsquo;" if minute else ""
+        rows.append(
+            f'<div class="tickerrow {esc(event.event_type)} {side}">'
+            f'<span class="minute">{minute_html}</span>'
+            f'<span>{label_html}{who}{esc(event.description)}</span></div>')
+    return f'<div class="ticker">{"".join(rows)}</div>'
 
 
 def _team_total(rows: pd.DataFrame, column: str) -> float | None:
@@ -1019,11 +1074,22 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
             "A smooth touch heatmap like Sofascore's needs its own, unverified "
             "source.</div>")
 
-    ticker_tab = (
-        '<div class="empty">No live play-by-play source is ingested yet. Planned '
-        "from kicker's match ticker, written against its page structure and "
-        "verified once reachable from outside this sandbox -- like the confirmed "
-        "line-up scraper already is.</div>")
+    events = detail.get("events", pd.DataFrame())
+    ticker_html = _render_ticker(events, match.home_team, match.away_team)
+    if ticker_html:
+        ticker_tab = (ticker_html
+                      + '<div class="caption">From kicker\'s live match ticker -- team and '
+                      "player are shown when the page's own text resolved to a known club "
+                      "or squad member, and kept as plain text when it did not. Written "
+                      "against kicker's page structure and verified once reachable from "
+                      "outside this sandbox, like the confirmed line-up scraper.</div>")
+    else:
+        ticker_tab = (
+            '<div class="empty">No live play-by-play source is ingested yet for this '
+            "match -- kicker's ticker isn't wired into <code>bet ingest</code> (it "
+            "needs a per-fixture URL, unlike the season-crawled sources), so it is "
+            "fetched via <code>KickerSource(store).ingest_ticker(...)</code> "
+            "directly.</div>")
 
     parts.append(
         # Plain div, not <nav>: the top-level tab bar's own script matches

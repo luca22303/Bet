@@ -684,6 +684,64 @@ def test_team_richer_tiles_blank_when_never_ingested():
     assert _team_richer_tiles(pd.DataFrame({"other": [1, 2]})) == ""
 
 
+def test_render_ticker_is_blank_with_no_events():
+    from bet.dashboard import _render_ticker
+
+    assert _render_ticker(pd.DataFrame(), "bayern_munich", "borussia_dortmund") == ""
+
+
+def test_render_ticker_shows_minute_label_and_side():
+    from bet.dashboard import _render_ticker
+
+    events = pd.DataFrame([
+        {"minute": 1, "stoppage": None, "event_type": "kickoff", "team_id": None,
+         "player_name": None, "description": "Anpfiff"},
+        {"minute": 23, "stoppage": None, "event_type": "goal", "team_id": "borussia_dortmund",
+         "player_name": "Guirassy", "description": "Tor fuer Borussia Dortmund"},
+        {"minute": 45, "stoppage": 2, "event_type": "yellow_card", "team_id": "bayern_munich",
+         "player_name": "Kimmich", "description": "Gelbe Karte fuer Kimmich"},
+        {"minute": 78, "stoppage": None, "event_type": "note", "team_id": None,
+         "player_name": None, "description": "Ein Kommentar ohne Klassifikation"},
+    ])
+    html = _render_ticker(events, "bayern_munich", "borussia_dortmund")
+
+    assert "45+2&rsquo;" in html
+    assert '<span class="label">Goal</span>' in html
+    assert "Guirassy" in html
+    assert '<div class="tickerrow goal away">' in html
+    assert '<div class="tickerrow yellow_card home">' in html
+    # An unclassified line still shows its own text, with no fabricated label.
+    assert "Ein Kommentar ohne Klassifikation" in html
+    assert '<span class="label"></span>' not in html
+
+
+def test_render_ticker_does_not_leak_pandas_nan_for_a_missing_player():
+    """A DataFrame column mixing None and real strings coerces the None to a
+    float NaN, not Python's None -- `if event.player_name` alone is truthy for
+    NaN, so a naive check would print the literal text "nan" for every event
+    with no resolved player once the frame also holds a resolved one."""
+    from bet.dashboard import _render_ticker
+
+    events = pd.DataFrame([
+        {"minute": 1, "stoppage": None, "event_type": "kickoff", "team_id": None,
+         "player_name": None, "description": "Anpfiff"},
+        {"minute": 23, "stoppage": None, "event_type": "goal", "team_id": "borussia_dortmund",
+         "player_name": "Guirassy", "description": "Tor fuer Borussia Dortmund"},
+    ])
+    html = _render_ticker(events, "bayern_munich", "borussia_dortmund")
+    assert "nan" not in html
+    assert "Guirassy" in html
+
+
+def test_ticker_tab_falls_back_to_an_honest_message_with_no_events(store_with_players):
+    """No live source ingested for this match must not look like a broken
+    feature -- it should say plainly that nothing has been fetched."""
+    from bet.dashboard import build
+
+    page = build(store_with_players, datetime(2024, 1, 5), days=8)
+    assert "No live play-by-play source is ingested yet" in page
+
+
 def test_player_modal_on_an_upcoming_fixture_shows_context_not_a_fake_score():
     from bet.dashboard import _player_modal
 

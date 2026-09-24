@@ -811,7 +811,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_diag = sub.add_parser("diagnose",
                             help="report what a scraped page actually contains")
-    p_diag.add_argument("--source", required=True, choices=["fbref", "kicker"])
+    p_diag.add_argument("--source", required=True,
+                        choices=["fbref", "kicker", "kicker_ticker"])
     p_diag.add_argument("--url", default=None, help="page to fetch and check")
     p_diag.add_argument("--file", default=None, help="saved page to check offline")
     p_diag.add_argument("--save-dir", dest="save_dir", default=None,

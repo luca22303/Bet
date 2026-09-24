@@ -72,6 +72,47 @@ def test_leakage_report_catches_an_injected_leak(populated_store):
     assert violations == 1
 
 
+def test_match_events_as_of_hides_events_not_yet_knowable(store):
+    """A dashboard rebuilt mid-match must show only what had actually
+    happened by `as_of`, not the finished ticker rendered early."""
+    kickoff = datetime(2024, 8, 24, 15, 30)
+    store.upsert("match_event", pd.DataFrame([
+        {"match_id": "m1", "source": "kicker", "sequence": 0, "minute": 1,
+         "stoppage": None, "event_type": "kickoff", "team_id": None,
+         "player_id": None, "player_name": None, "detail": None,
+         "description": "Anpfiff", "known_at": kickoff},
+        {"match_id": "m1", "source": "kicker", "sequence": 1, "minute": 70,
+         "stoppage": None, "event_type": "goal", "team_id": None,
+         "player_id": None, "player_name": None, "detail": None,
+         "description": "Tor", "known_at": kickoff + timedelta(minutes=70)},
+    ]), ["match_id", "source", "sequence"])
+
+    at_half_time = store.match_events_as_of(kickoff + timedelta(minutes=45), "m1")
+    assert list(at_half_time["event_type"]) == ["kickoff"]
+
+    after_final_whistle = store.match_events_as_of(kickoff + timedelta(hours=3), "m1")
+    assert list(after_final_whistle["event_type"]) == ["kickoff", "goal"]
+
+
+def test_leakage_report_catches_a_ticker_event_known_before_kickoff(populated_store):
+    """A ticker event's known_at floor is kickoff plus its minute, so one
+    stamped before kickoff at all is a bug in the ingest, not a real event."""
+    store = populated_store
+    match_id, kickoff = store.con.execute(
+        "SELECT match_id, kickoff_utc FROM match LIMIT 1").fetchone()
+
+    store.upsert("match_event", pd.DataFrame([{
+        "match_id": match_id, "source": "kicker", "sequence": 0, "minute": 1,
+        "stoppage": None, "event_type": "kickoff", "team_id": None,
+        "player_id": None, "player_name": None, "detail": None,
+        "description": "Anpfiff", "known_at": kickoff - timedelta(hours=1),
+    }]), ["match_id", "source", "sequence"])
+
+    report = store.leakage_report()
+    violations = int(report.loc[report["table"] == "match_event", "violations"].iloc[0])
+    assert violations == 1
+
+
 def test_upsert_is_idempotent(store):
     frame = pd.DataFrame([{
         "match_id": "x", "source": "t", "league": "bundesliga", "season": "2024-25",

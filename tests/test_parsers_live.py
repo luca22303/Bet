@@ -26,8 +26,10 @@ from bet.ingest.fbref import (
     _is_not_a_player,
 )
 from bet.ingest.kicker import (
+    classify_event,
     extract_embedded_json,
     parse_lineup_page,
+    parse_ticker_page,
     plausible_formation,
     _is_name_like,
 )
@@ -310,6 +312,142 @@ def test_embedded_json_is_found_in_several_wrappers():
         assert extract_embedded_json(wrapper) == [{"a": 1}]
 
 
+# ------------------------------------------------------------ kicker ticker
+
+
+_TICKER_LINES = [
+    (1, None, "Anpfiff im Signal Iduna Park.", "kickoff"),
+    (23, None, "Tor fuer Borussia Dortmund, 1:0 durch Guirassy.", "goal"),
+    (45, 2, "Gelbe Karte fuer Kimmich (Bayern Muenchen).", "yellow_card"),
+    (67, None, "Wechsel bei Bayern Muenchen: Musiala kommt fuer Sane.", "substitution"),
+    (90, None, "Abpfiff. Borussia Dortmund gewinnt gegen Bayern Muenchen.", "full_time"),
+]
+
+
+def _ticker_markup_page():
+    rows = "".join(
+        f'<div class="ticker-event"><span class="minute">{m}'
+        f"{'+' + str(s) if s else ''}'</span> {text}</div>"
+        for m, s, text, _ in _TICKER_LINES)
+    return f"<html><body>{rows}</body></html>"
+
+
+def _ticker_text_page():
+    lines = "".join(
+        f"<p>{m}{'+' + str(s) if s else ''}' {text}</p>" for m, s, text, _ in _TICKER_LINES)
+    return f"<html><body>{lines}</body></html>"
+
+
+def _ticker_json_page():
+    payload = {"props": {"pageProps": {"ticker": [
+        {"minute": str(m) + (f"+{s}" if s else ""), "text": text}
+        for m, s, text, _ in _TICKER_LINES
+    ]}}}
+    return f'<html><body><script id="__NEXT_DATA__">{json.dumps(payload)}</script></body></html>'
+
+
+@pytest.mark.parametrize("page,strategy", [
+    (_ticker_json_page(), "embedded-json"),
+    (_ticker_markup_page(), "markup"),
+    (_ticker_text_page(), "generic"),
+], ids=["json", "markup", "text"])
+def test_ticker_falls_back_through_its_strategies(page, strategy):
+    """Same defence as the line-up parser, for the same reason: kicker.de is
+    unreachable from here, so the strategy that actually works live is
+    unknown, and the response is several independent routes rather than one
+    guess at the markup."""
+    result = parse_ticker_page(page)
+    assert result["strategy"] == strategy
+    assert [e["event_type"] for e in result["events"]] == [t for *_, t in _TICKER_LINES]
+    assert [e["minute"] for e in result["events"]] == [m for m, *_ in _TICKER_LINES]
+    assert result["events"][2]["stoppage"] == 2
+    # sequence disambiguates events that would otherwise tie on minute alone.
+    assert [e["sequence"] for e in result["events"]] == list(range(len(_TICKER_LINES)))
+
+
+def test_ticker_reports_when_nothing_parses():
+    result = parse_ticker_page("<html><body><p>no ticker here</p></body></html>")
+    assert result["events"] == []
+    assert result["strategy"] == "none"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Eigentor von Kimmich", "own_goal"),
+    ("Tor fuer Borussia Dortmund", "goal"),
+    ("Elfmeter verschossen von Kane", "penalty_missed"),
+    ("Elfmeter verwandelt von Kane", "penalty_goal"),
+    ("Gelb-Rote Karte fuer Sane", "second_yellow"),
+    ("Rote Karte fuer Sane", "red_card"),
+    ("Gelbe Karte fuer Sane", "yellow_card"),
+    ("Wechsel bei Bayern: Musiala fuer Sane", "substitution"),
+    ("Video-Beweis laeuft", "var_review"),
+    ("Halbzeit", "half_time"),
+    ("Ein munterer Spielverlauf bisher", "note"),
+])
+def test_event_classification_prefers_the_more_specific_pattern(text, expected):
+    """An own goal and a missed penalty both contain the word a plain goal or
+    scored penalty also uses -- 'Tor'/'Elfmeter' -- so the more specific
+    pattern has to be tried first or it never gets a turn."""
+    assert classify_event(text) == expected
+
+
+def test_ticker_keeps_team_and_player_when_the_json_carries_them():
+    payload = {"props": {"pageProps": {"ticker": [
+        {"minute": "23", "text": "Tor fuer Borussia Dortmund",
+         "team": {"name": "Borussia Dortmund"}, "player": {"name": "Guirassy"}},
+        {"minute": "40", "text": "Ein Kommentar ohne Person"},
+    ]}}}
+    page = f'<html><body><script id="__NEXT_DATA__">{json.dumps(payload)}</script></body></html>'
+    events = parse_ticker_page(page)["events"]
+    assert events[0]["team"] == "Borussia Dortmund"
+    assert events[0]["player"] == "Guirassy"
+    assert events[1]["team"] is None
+    assert events[1]["player"] is None
+
+
+def test_ticker_ingest_writes_events_and_resolves_what_it_can(store):
+    """An unresolved team or player still keeps the event -- unlike a
+    line-up mismatch, a ticker line is still meaningful without one.
+
+    Exercises `_event_rows` and the store write directly, bypassing
+    `.fetch()`, the same way the fbref tests call `_parse_match_page`
+    directly rather than mocking an HTTP layer neither site can be reached
+    to test against here.
+    """
+    import pandas as pd
+    from datetime import datetime as dt, timedelta
+    from bet.ingest.kicker import KickerSource
+
+    payload = {"props": {"pageProps": {"ticker": [
+        {"minute": "1", "text": "Anpfiff"},
+        {"minute": "23", "text": "Tor fuer Bayern Muenchen",
+         "team": {"name": "Bayern München"}, "player": {"name": "Sane"}},
+        {"minute": "40", "text": "Ereignis fuer ein unbekanntes Team",
+         "team": {"name": "Nicht Existiert FC"}},
+    ]}}}
+    page = f'<html><body><script id="__NEXT_DATA__">{json.dumps(payload)}</script></body></html>'
+
+    source = KickerSource(store, raw_dir="/tmp", delay=0)
+    parsed = parse_ticker_page(page)
+    kickoff = dt(2024, 8, 24, 15, 30)
+    rows = source._event_rows(parsed["events"], "m1", kickoff)
+    assert len(rows) == 3
+    store.upsert("match_event", pd.DataFrame(rows), ["match_id", "source", "sequence"])
+
+    events = store.match_events_as_of(kickoff + timedelta(days=1), "m1")
+    assert len(events) == 3
+    goal = events[events["event_type"] == "goal"].iloc[0]
+    assert goal["team_id"] == "bayern_munich"
+    assert goal["player_name"] == "Sane"
+    unresolved = events[events["description"].str.contains("unbekanntes")].iloc[0]
+    assert pd.isna(unresolved["team_id"])
+    assert unresolved["description"]  # kept, not dropped
+
+    # known_at is always at or after kickoff -- the point-in-time discipline
+    # the leakage guard checks -- since the page gives a minute, not a clock.
+    assert (events["known_at"] >= kickoff).all()
+
+
 # ----------------------------------------------------------------- diagnose
 
 
@@ -350,6 +488,23 @@ def test_diagnose_checks_every_kicker_strategy_not_just_the_winner():
     assert "strategy: embedded-json" in steps
     assert "strategy: markup" in steps
     assert "strategy: generic" in steps
+
+
+def test_diagnose_checks_every_ticker_strategy_not_just_the_winner():
+    from bet.diagnose import diagnose_kicker_ticker
+    steps = {f.step for f in diagnose_kicker_ticker(_ticker_json_page())}
+    assert "strategy: embedded-json" in steps
+    assert "strategy: markup" in steps
+    assert "strategy: generic" in steps
+
+
+def test_diagnose_reports_ticker_minute_markers_and_class_names():
+    from bet.diagnose import diagnose_kicker_ticker
+    findings = diagnose_kicker_ticker(
+        '<html><body><div class="mod-ticker">no real events here</div></body></html>')
+    failed = {f.step: f for f in findings if not f.ok}
+    assert "overall" in failed
+    assert "mod-ticker" in " ".join(failed["overall"].evidence)
 
 
 def _possession_table(table_id, prefix, count=12):

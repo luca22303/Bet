@@ -223,6 +223,31 @@ CREATE TABLE IF NOT EXISTS lineup (
     PRIMARY KEY (match_id, player_id, source, known_at)
 );
 
+-- A match's play-by-play log: goals, cards, substitutions, kickoff/half/full
+-- time markers. Purely a display feature -- nothing here feeds a model -- so
+-- `team_id`/`player_id` are best-effort and nullable rather than dropping an
+-- event a name could not be resolved for, unlike a line-up mismatch that
+-- would corrupt two players' histories.
+--
+-- `sequence` rather than `minute` in the key: two events can share a minute
+-- (a goal and the restart, or two cards in a stoppage), and the page's own
+-- order is the only thing that then still tells them apart.
+CREATE TABLE IF NOT EXISTS match_event (
+    match_id     VARCHAR NOT NULL,
+    source       VARCHAR NOT NULL,
+    sequence     INTEGER NOT NULL,
+    minute       INTEGER,
+    stoppage     INTEGER,     -- injury-time minute, e.g. the 2 in "90+2"
+    event_type   VARCHAR NOT NULL,
+    team_id      VARCHAR,
+    player_id    VARCHAR,
+    player_name  VARCHAR,     -- kept even when resolution fails, for display
+    detail       VARCHAR,
+    description  VARCHAR NOT NULL,
+    known_at     TIMESTAMP NOT NULL,
+    PRIMARY KEY (match_id, source, sequence)
+);
+
 -- Injury and suspension reports. Append-only: a player's status changes over
 -- time and the history is what lets a backtest see what was known then.
 CREATE TABLE IF NOT EXISTS player_availability (
@@ -307,4 +332,4 @@ MIGRATIONS = "\n".join(
 # Tables that carry point-in-time facts, checked by the leakage guard.
 PIT_TABLES = ("match", "match_result", "odds_quote", "team_rating", "shot",
               "player", "player_match_stat", "lineup", "player_availability",
-              "team_match_stat")
+              "team_match_stat", "match_event")

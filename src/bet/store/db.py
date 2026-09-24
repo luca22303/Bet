@@ -511,6 +511,23 @@ class Store:
         ).df()
         return {r.player_id: (r.full_name or r.player_id) for r in rows.itertuples()}
 
+    def match_events_as_of(self, as_of: datetime, match_id: str) -> pd.DataFrame:
+        """A match's play-by-play log, gated the same as every other read here.
+
+        A dashboard rebuilt mid-match shows only what had actually happened by
+        `as_of`, not the finished log rendered early.
+        """
+        return self.con.execute(
+            """
+            SELECT match_id, source, sequence, minute, stoppage, event_type,
+                   team_id, player_id, player_name, detail, description, known_at
+            FROM match_event
+            WHERE match_id = ? AND known_at <= ?
+            ORDER BY sequence
+            """,
+            [match_id, as_of],
+        ).df()
+
     # ------------------------------------------------------------ diagnostics
 
     def leakage_report(self) -> pd.DataFrame:
@@ -540,6 +557,10 @@ class Store:
             ("lineup", """
                 SELECT COUNT(*) FROM lineup l JOIN match m USING (match_id)
                 WHERE l.known_at > m.kickoff_utc
+            """),
+            ("match_event", """
+                SELECT COUNT(*) FROM match_event e JOIN match m USING (match_id)
+                WHERE e.known_at < m.kickoff_utc
             """),
         ]
         rows = [{"table": name, "violations": self.con.execute(sql).fetchone()[0]} for name, sql in checks]

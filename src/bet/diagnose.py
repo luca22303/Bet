@@ -197,6 +197,62 @@ def diagnose_kicker(html_text: str) -> list[Finding]:
     return findings
 
 
+def diagnose_kicker_ticker(html_text: str) -> list[Finding]:
+    """Check each ticker strategy independently, not just the winner."""
+    from bet.ingest.kicker import (
+        _events_from_json,
+        _events_from_markup,
+        _events_from_text,
+        extract_embedded_json,
+        parse_ticker_page,
+    )
+
+    findings = []
+
+    payloads = extract_embedded_json(html_text)
+    keys = []
+    for payload in payloads[:3]:
+        if isinstance(payload, dict):
+            keys.extend(list(payload.keys())[:6])
+    findings.append(Finding(
+        "embedded JSON", bool(payloads),
+        f"{len(payloads)} JSON payload(s) found",
+        [f"top-level keys: {', '.join(keys[:10])}"] if keys else
+        ["tried: __NEXT_DATA__, __NUXT__, __INITIAL_STATE__, ld+json"]))
+
+    minutes = len(re.findall(r"\d{1,3}(?:\+\d{1,2})?\s*[’'`´]", html_text))
+    findings.append(Finding(
+        "minute markers", minutes > 0,
+        f"{minutes} apostrophe-minute pattern(s) found on the page",
+        [] if minutes else ["no \"N'\" or \"N+M'\" text anywhere on the page"]))
+
+    for label, extractor in (("strategy: embedded-json", _events_from_json),
+                             ("strategy: markup", _events_from_markup),
+                             ("strategy: generic", _events_from_text)):
+        try:
+            events = extractor(html_text)
+        except Exception as exc:
+            findings.append(Finding(label, False, f"raised {type(exc).__name__}: {exc}"))
+            continue
+        evidence = []
+        for e in events[:6]:
+            stoppage = f"+{e['stoppage']}" if e["stoppage"] else ""
+            evidence.append(f"{e['minute']}'{stoppage} [{e['event_type']}] "
+                            f"{e['description'][:70]}")
+        findings.append(Finding(
+            label, bool(events),
+            f"{len(events)} event(s)" if events else "found nothing", evidence))
+
+    result = parse_ticker_page(html_text)
+    findings.append(Finding(
+        "overall", bool(result["events"]),
+        f'strategy={result["strategy"]}, {len(result["events"])} event(s)',
+        [] if result["events"] else
+        [f"class names on the page: {_classes(html_text)}"]))
+
+    return findings
+
+
 def _first(text: str, pattern: str) -> str:
     match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
     return (match.group(1).strip()[:90] if match else "(not found)")
@@ -217,7 +273,8 @@ def _classes(text: str) -> str:
     for value in re.findall(r'class="([^"]{1,120})"', text)[:400]:
         classes.update(value.split())
     interesting = [c for c in sorted(classes)
-                   if re.search(r"line|team|player|spieler|form|squad|name", c, re.I)]
+                   if re.search(r"line|team|player|spieler|form|squad|name"
+                                r"|ticker|event|verlauf", c, re.I)]
     return ", ".join(interesting[:12]) or "(nothing name-like)"
 
 
@@ -251,7 +308,8 @@ def run(source: str, url: str, store, *, save_dir: Path | None = None) -> Diagno
     else:
         diagnosis.saved_to = path
 
-    checkers = {"fbref": diagnose_fbref, "kicker": diagnose_kicker}
+    checkers = {"fbref": diagnose_fbref, "kicker": diagnose_kicker,
+                "kicker_ticker": diagnose_kicker_ticker}
     checker = checkers.get(source)
     if checker is None:
         diagnosis.findings.append(
