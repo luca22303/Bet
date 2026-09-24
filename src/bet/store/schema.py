@@ -248,6 +248,43 @@ CREATE TABLE IF NOT EXISTS match_event (
     PRIMARY KEY (match_id, source, sequence)
 );
 
+-- Post-match player ratings from an external site (Sofascore, or similar).
+--
+-- A separate table from player_match_stat rather than a column there: this
+-- is a subjective aggregate rating the site itself publishes, not a stat
+-- FBref counted from the match, and different sources genuinely disagree on
+-- it the way two results almost never do. Keeping it apart also means a
+-- wrong guess at this adapter's JSON shape can only ever leave this table
+-- empty -- it can never blank out a good FBref box score for the same
+-- player by writing a mostly-null row under that row's own key.
+CREATE TABLE IF NOT EXISTS player_match_rating (
+    match_id   VARCHAR NOT NULL,
+    player_id  VARCHAR NOT NULL,
+    team_id    VARCHAR NOT NULL,
+    source     VARCHAR NOT NULL,
+    rating     DOUBLE NOT NULL,
+    known_at   TIMESTAMP NOT NULL,
+    PRIMARY KEY (match_id, player_id, source)
+);
+
+-- Raw touch-location points behind a smoothed "walking heatmap".
+--
+-- Fine-grained (dozens of points per player) rather than the pre-binned
+-- image Sofascore itself shows, so this store holds the primary data and the
+-- dashboard can draw it at whatever resolution it wants, rather than storing
+-- somebody else's already-rendered picture.
+CREATE TABLE IF NOT EXISTS player_heatmap_point (
+    match_id   VARCHAR NOT NULL,
+    player_id  VARCHAR NOT NULL,
+    team_id    VARCHAR NOT NULL,
+    source     VARCHAR NOT NULL,
+    sequence   INTEGER NOT NULL,
+    x          DOUBLE NOT NULL,
+    y          DOUBLE NOT NULL,
+    known_at   TIMESTAMP NOT NULL,
+    PRIMARY KEY (match_id, player_id, source, sequence)
+);
+
 -- Injury and suspension reports. Append-only: a player's status changes over
 -- time and the history is what lets a backtest see what was known then.
 CREATE TABLE IF NOT EXISTS player_availability (
@@ -332,4 +369,5 @@ MIGRATIONS = "\n".join(
 # Tables that carry point-in-time facts, checked by the leakage guard.
 PIT_TABLES = ("match", "match_result", "odds_quote", "team_rating", "shot",
               "player", "player_match_stat", "lineup", "player_availability",
-              "team_match_stat", "match_event")
+              "team_match_stat", "match_event", "player_match_rating",
+              "player_heatmap_point")

@@ -454,6 +454,57 @@ def zone_heatmap(shares: dict, *, width: int = 300, height: int = 400,
     return "".join(parts)
 
 
+def smooth_heatmap(grid, *, width: int = 300, height: int = 400, team_name: str = "") -> str:
+    """A continuous-looking touch density, from `spatial.pitch.smooth_touch_grid`.
+
+    Drawn as a fine grid of coloured, semi-transparent cells rather than a
+    raster image, so it stays inline SVG like every other mark here -- finer
+    and smoother-looking than the three-band zone heatmap only because the
+    grid has many more cells and a soft edge, not because anything is
+    interpolated between recorded points beyond the Gaussian smoothing
+    already baked into `grid` itself.
+    """
+    margin = 16
+    play_w = width - margin * 2
+    play_h = height - margin * 2
+    x_bins, y_bins = grid.shape
+    cell_w = play_w / y_bins
+    cell_h = play_h / x_bins
+
+    parts = [f'<svg viewBox="0 0 {width} {height}" class="pitch" role="img" '
+             f'aria-label="{esc(team_name)} touch density">']
+    parts.append(f'<rect class="turf" x="{margin}" y="{margin}" width="{play_w}" '
+                 f'height="{play_h}" rx="4"/>')
+
+    # x is the pitch-length axis (attacking upward, matching every other mark
+    # in this file); y is the pitch-width axis, left to right unchanged.
+    for i in range(x_bins):
+        for j in range(y_bins):
+            intensity = float(grid[i, j])
+            if intensity < 0.06:               # near-zero cells stay plain turf
+                continue
+            fill, _ = _seq_color(intensity)
+            x = margin + j * cell_w
+            y = margin + play_h - (i + 1) * cell_h
+            parts.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{cell_w + 0.5:.1f}" '
+                f'height="{cell_h + 0.5:.1f}" fill="{fill}" '
+                f'opacity="{0.20 + 0.65 * intensity:.2f}"/>')
+
+    mid_y = margin + play_h / 2
+    parts.append(f'<line class="pitchline" x1="{margin}" y1="{mid_y:.1f}" '
+                 f'x2="{margin + play_w}" y2="{mid_y:.1f}"/>')
+    parts.append(f'<circle class="pitchline" cx="{width / 2}" cy="{mid_y:.1f}" r="26" fill="none"/>')
+    box_w, box_h = play_w * 0.56, play_h * 0.12
+    box_x = (width - box_w) / 2
+    parts.append(f'<rect class="pitchline" x="{box_x:.1f}" y="{margin:.1f}" '
+                 f'width="{box_w:.1f}" height="{box_h:.1f}" fill="none"/>')
+    parts.append(f'<rect class="pitchline" x="{box_x:.1f}" y="{margin + play_h - box_h:.1f}" '
+                 f'width="{box_w:.1f}" height="{box_h:.1f}" fill="none"/>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def pitch(formation: str, players: list[dict], *, width: int = 300,
           height: int = 400, team_name: str = "", confirmed: bool = False) -> str:
     """A formation drawn on a pitch, attacking upward.

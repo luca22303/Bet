@@ -102,6 +102,7 @@ All free, no API keys.
 | OpenLigaDB | fixtures, results, matchday structure | a plain public API, no scraping grey area |
 | FBref | per-match player lines (shots, xG, passing, tackles, cards, minutes, shot distance, dribbles, aerials, GK saves) | match pages, not season totals — see below |
 | kicker.de | predicted and confirmed XIs, live match ticker | forward-looking only; historical XIs come free from FBref |
+| Sofascore | post-match player ratings, touch-location heatmap points | not free-vs-paid the way the others are gated, just unreachable from here to verify — see below |
 
 football-data.co.uk also carries **shots, shots on target, corners, fouls and
 cards** per match, in the same CSVs already downloaded for results and odds.
@@ -475,12 +476,14 @@ Closing line value converges in weeks instead of years.
 
 - Live odds ingestion and +EV alerting
 - A scheduler — `bet watch` is one polling pass, meant for cron
-- Line-up and ticker *fetching* — the T-60 workflow, the kicker line-up
-  parser and the live-ticker parser all exist, but neither parser is
-  verified against live HTML (see below), and neither is wired into
-  `bet ingest`: both need a per-fixture URL rather than a season crawl, so
-  they are called directly as `KickerSource(store).ingest(...)` /
-  `.ingest_ticker(...)`
+- Line-up, ticker and Sofascore *fetching* — the T-60 workflow, the kicker
+  line-up parser, the live-ticker parser and the Sofascore adapter all
+  exist, but none of the three is verified against a live response (see
+  below), and none is wired into `bet ingest`: all three need a
+  per-fixture (or per-event) id rather than a season crawl, so they are
+  called directly as `KickerSource(store).ingest(...)` /
+  `.ingest_ticker(...)` and `SofascoreSource(store).ingest(...)` /
+  `.ingest_heatmaps()`
 - Prop backtesting against historical prop lines (no free source carries them)
 - Bayesian hierarchical variant, for parameter uncertainty that Kelly can use
 
@@ -586,8 +589,9 @@ Expected risk on first contact, lowest to highest:
 | FBref | medium | parses on content, not ids — see below |
 | kicker (line-ups) | medium | three fallback strategies — see below |
 | kicker (ticker) | medium | same three-tier approach, applied to the live event log — see below |
+| Sofascore | medium-high | a JSON API rather than server-rendered HTML, so the risk is guessing its exact field names, not its markup — see below |
 
-### What was done about the two risky ones
+### What was done about the risky ones
 
 Both originally keyed off exact markup that was invented, not observed. They now
 identify content instead:
@@ -615,6 +619,18 @@ plain goal just because "Tor"/"Elfmeter" appears in both). Unlike the
 line-up parser, an unresolved team or player never drops the event — it is a
 display-only feature nothing downstream reads, so the original text is kept
 either way.
+
+**Sofascore** is the one adapter here that is not server-rendered HTML at
+all — `api.sofascore.com` returns plain JSON, so there is no markup to guess
+at and no multi-strategy fallback to build. The risk moves entirely to field
+names: a lineups payload's rating might sit under `statistics.rating`,
+`statistics.sofascoreRating`, or bare on the entry itself, and several
+plausible spellings are tried defensively rather than committing to one. A
+wrong guess leaves a column empty, never wrong — the same "first non-null
+wins" discipline FBref's own column mapping uses. Ratings and heatmap points
+are kept in their own tables (`player_match_rating`,
+`player_heatmap_point`) rather than merged into FBref's box score, so a bad
+guess here can never blank out a good FBref row for the same player.
 
 Two real bugs fell out of doing this. `pandas.read_html` needs `lxml`, which
 was never declared as a dependency — and the code caught `ImportError` alongside

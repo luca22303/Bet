@@ -528,6 +528,45 @@ class Store:
             [match_id, as_of],
         ).df()
 
+    def player_ratings_as_of(self, as_of: datetime, match_id: str) -> pd.DataFrame:
+        """External post-match ratings (Sofascore, or similar) for a match.
+
+        Point-in-time gated like every other read here, and kept from its own
+        table rather than merged into `player_stats_as_of`'s result: a rating
+        is a separate, source-tagged fact, not part of the FBref box score.
+        """
+        return self.con.execute(
+            """
+            SELECT match_id, player_id, team_id, source, rating, known_at
+            FROM player_match_rating
+            WHERE match_id = ? AND known_at <= ?
+            """,
+            [match_id, as_of],
+        ).df()
+
+    def heatmap_points_as_of(self, as_of: datetime, match_id: str, *,
+                             player_id: str | None = None) -> pd.DataFrame:
+        """Raw touch-location points behind a smoothed heatmap.
+
+        `player_id` narrows to one player's own points for the click-through
+        modal; omitted, it returns the whole match's points for the
+        team-level Heatmaps tab to group by `team_id` itself.
+        """
+        where = ["match_id = ?", "known_at <= ?"]
+        params: list = [match_id, as_of]
+        if player_id is not None:
+            where.append("player_id = ?")
+            params.append(player_id)
+        return self.con.execute(
+            f"""
+            SELECT match_id, player_id, team_id, source, sequence, x, y, known_at
+            FROM player_heatmap_point
+            WHERE {' AND '.join(where)}
+            ORDER BY sequence
+            """,
+            params,
+        ).df()
+
     # ------------------------------------------------------------ diagnostics
 
     def leakage_report(self) -> pd.DataFrame:
@@ -561,6 +600,14 @@ class Store:
             ("match_event", """
                 SELECT COUNT(*) FROM match_event e JOIN match m USING (match_id)
                 WHERE e.known_at < m.kickoff_utc
+            """),
+            ("player_match_rating", """
+                SELECT COUNT(*) FROM player_match_rating r JOIN match m USING (match_id)
+                WHERE r.known_at < m.kickoff_utc
+            """),
+            ("player_heatmap_point", """
+                SELECT COUNT(*) FROM player_heatmap_point h JOIN match m USING (match_id)
+                WHERE h.known_at < m.kickoff_utc
             """),
         ]
         rows = [{"table": name, "violations": self.con.execute(sql).fetchone()[0]} for name, sql in checks]

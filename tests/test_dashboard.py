@@ -625,6 +625,23 @@ def test_player_modal_shows_real_keeper_stats_when_ingested():
     assert modal["note"] == ""
 
 
+def test_player_modal_shows_a_sofascore_heatmap_without_an_fbref_box_score():
+    """Rating and heatmap points are Sofascore's own facts, independent of
+    FBref's box score -- one scraper having nothing for this player/match
+    must not silently hide what the other one has."""
+    from bet.dashboard import _player_modal
+
+    points = [(0.6, 0.5)] * 15
+    modal = _player_modal(
+        "p1", "Kimmich", "Bayern", "midfielder", "MF", 1.0, 0,
+        box_score=None, played=True, rating=7.9, heatmap_points=points)
+
+    rows = dict(modal["rows"])
+    assert rows["Rating (Sofascore)"] == "7.9"
+    assert modal["heatmap"] is not None
+    assert "touch density" in modal["heatmap"]
+
+
 def test_player_modal_shows_the_richer_outfield_stats_when_present():
     from bet.dashboard import _player_modal
 
@@ -740,6 +757,50 @@ def test_ticker_tab_falls_back_to_an_honest_message_with_no_events(store_with_pl
 
     page = build(store_with_players, datetime(2024, 1, 5), days=8)
     assert "No live play-by-play source is ingested yet" in page
+
+
+def test_sofascore_rating_and_walking_heatmap_appear_once_ingested(store_with_players):
+    """End to end through `build()`: a Sofascore rating and enough heatmap
+    points for a real density both surface, on top of whatever FBref already
+    supplied, without disturbing it."""
+    from bet.dashboard import build
+
+    store = store_with_players
+    # Only a starter gets a click-through modal at all (`build_match_detail`
+    # only builds one per `lineup.starters`), so the seeded row has to be one.
+    match_id, player_id, team_id, known_at = store.con.execute(
+        """
+        SELECT s.match_id, s.player_id, s.team_id, m.kickoff_utc
+        FROM player_match_stat s JOIN match m USING (match_id)
+        WHERE m.kickoff_utc < ? AND s.started ORDER BY m.kickoff_utc DESC LIMIT 1
+        """,
+        [datetime(2024, 1, 5)],
+    ).fetchone()
+    known_at = known_at + timedelta(hours=2)
+
+    store.upsert("player_match_rating", pd.DataFrame([{
+        "match_id": match_id, "player_id": player_id, "team_id": team_id,
+        "source": "sofascore", "rating": 8.3, "known_at": known_at,
+    }]), ["match_id", "player_id", "source"])
+    store.upsert("player_heatmap_point", pd.DataFrame([
+        {"match_id": match_id, "player_id": player_id, "team_id": team_id,
+         "source": "sofascore", "sequence": i, "x": 0.6 + i * 0.01, "y": 0.5,
+         "known_at": known_at}
+        for i in range(15)
+    ]), ["match_id", "player_id", "source", "sequence"])
+
+    page = build(store, datetime(2024, 1, 5), days=8)
+    assert "Rating (Sofascore)" in page
+    assert "8.3" in page
+    assert "Walking heatmap" in page
+
+
+def test_no_sofascore_data_leaves_the_heatmap_tab_on_the_honest_fallback(store_with_players):
+    from bet.dashboard import build
+
+    page = build(store_with_players, datetime(2024, 1, 5), days=8)
+    assert "Rating (Sofascore)" not in page
+    assert "Walking heatmap" not in page
 
 
 def test_player_modal_on_an_upcoming_fixture_shows_context_not_a_fake_score():
@@ -913,6 +974,40 @@ def test_zone_heatmap_text_stays_legible_at_both_ends_of_the_scale():
     light = zone_heatmap({"thirds": {"def": 0.02, "mid": 0.02, "att": 0.96},
                          "penalty": {}})
     assert 'fill="#fff">2%' not in light
+
+
+# --------------------------------------------------------- smooth heatmap
+
+def test_smooth_touch_grid_needs_a_minimum_number_of_points():
+    """A handful of touches would draw a couple of isolated bumps that look
+    like a real spatial pattern but are just noise from too little data."""
+    from bet.spatial.pitch import smooth_touch_grid
+
+    assert smooth_touch_grid([(0.5, 0.5)] * 3) is None
+    assert smooth_touch_grid([]) is None
+
+
+def test_smooth_touch_grid_peaks_where_the_points_cluster():
+    from bet.spatial.pitch import smooth_touch_grid
+
+    points = [(0.8, 0.5)] * 20
+    grid = smooth_touch_grid(points, x_bins=20, y_bins=20)
+    assert grid is not None
+    assert grid.max() == pytest.approx(1.0)
+    peak_i, peak_j = np.unravel_index(grid.argmax(), grid.shape)
+    assert peak_i / 20 == pytest.approx(0.8, abs=0.1)
+    assert peak_j / 20 == pytest.approx(0.5, abs=0.1)
+
+
+def test_smooth_heatmap_draws_a_fine_grid_over_the_pitch():
+    from bet.spatial.pitch import smooth_touch_grid
+    from bet.viz import smooth_heatmap
+
+    grid = smooth_touch_grid([(0.7, 0.5)] * 15, x_bins=10, y_bins=10)
+    svg = smooth_heatmap(grid, team_name="Bayern Munich")
+    assert 'aria-label="Bayern Munich touch density"' in svg
+    assert svg.count("<rect") > 3        # turf + boxes + several density cells
+    assert '<circle class="pitchline"' in svg
 
 
 # --------------------------------------------------- top-level nav collision

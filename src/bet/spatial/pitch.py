@@ -197,6 +197,42 @@ def touch_zone_shares(rows: pd.DataFrame) -> dict | None:
     return {"thirds": shares, "penalty": penalty, "touches": grand_total}
 
 
+# Fewer points than this and a density grid would just be showing a handful
+# of isolated bumps as though they were a real spatial pattern; ten touches
+# tell you almost nothing about where a player spent the match.
+MIN_HEATMAP_POINTS = 10
+
+
+def smooth_touch_grid(points: list[tuple[float, float]], *, x_bins: int = 24,
+                      y_bins: int = 32, bandwidth: float = 0.08) -> np.ndarray | None:
+    """A Gaussian-smoothed density grid from raw touch-location points.
+
+    Finer and continuous-looking, unlike `touch_zone_shares`'s three coarse
+    bands -- this is the "walking heatmap" a Sofascore-style view needs. Still
+    honest about what it is: real recorded locations, smoothed only for
+    legibility, not a claim of tracking data this project does not have.
+
+    Returns an (x_bins, y_bins) grid normalised to peak at 1.0, or `None` for
+    too few points -- see `MIN_HEATMAP_POINTS`.
+    """
+    if len(points) < MIN_HEATMAP_POINTS:
+        return None
+
+    xs = np.clip(np.array([p[0] for p in points], dtype=float), 0.0, 1.0)
+    ys = np.clip(np.array([p[1] for p in points], dtype=float), 0.0, 1.0)
+
+    grid_x = (np.arange(x_bins) + 0.5) / x_bins
+    grid_y = (np.arange(y_bins) + 0.5) / y_bins
+    gx, gy = np.meshgrid(grid_x, grid_y, indexing="ij")
+
+    density = np.zeros_like(gx)
+    for x, y in zip(xs, ys):
+        density += np.exp(-((gx - x) ** 2 + (gy - y) ** 2) / (2 * bandwidth ** 2))
+
+    peak = density.max()
+    return density / peak if peak > 0 else None
+
+
 def heatmap_to_frame(grid: np.ndarray) -> pd.DataFrame:
     """Long-format grid, ready to plot."""
     x_bins, y_bins = grid.shape

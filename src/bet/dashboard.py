@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from bet.config import GERMAN_STAKE_TAX, OUTCOMES
-from bet.spatial.pitch import touch_zone_shares
+from bet.spatial.pitch import smooth_touch_grid, touch_zone_shares
 from bet.viz import (
     Series,
     diverging_bar,
@@ -33,6 +33,7 @@ from bet.viz import (
     line_chart,
     pitch,
     scatter,
+    smooth_heatmap,
     stat_tile,
     zone_heatmap,
 )
@@ -383,21 +384,40 @@ def _num(value, digits: int = 0) -> str | None:
 
 def _player_modal(player_id: str, name: str, team: str, group: str, position: str,
                   propensity: float | None, days_since_start,
-                  box_score: dict | None, played: bool) -> dict:
+                  box_score: dict | None, played: bool, *,
+                  rating: float | None = None,
+                  heatmap_points: list[tuple[float, float]] | None = None) -> dict:
     """What clicking this player's marker on the pitch shows.
 
     A played match has its own box score -- the real minutes, goals and
     assists from this fixture. An upcoming one only has the rolling per-90
     rate that fed the prediction, and says so rather than presenting a rate
     as if it were this match's number.
+
+    `rating` (Sofascore) and `heatmap_points` (raw touch locations, also
+    Sofascore) are both optional and independent of the FBref box score --
+    neither is guaranteed to exist for a match the coarser zone heatmap does.
     """
     rows: list[tuple[str, str]] = [("Position", position or group.replace("_", " ").title())]
-    heatmap = None
-    if played and box_score:
-        shares = touch_zone_shares(pd.DataFrame([box_score]))
-        if shares is not None:
-            heatmap = zone_heatmap(shares, width=220, height=280, team_name=name)
+    if rating is not None and not pd.isna(rating):
+        rows.append(("Rating (Sofascore)", f"{rating:.1f}"))
 
+    heatmap = None
+    if played:
+        # The finer, Sofascore-derived density wins over FBref's three coarse
+        # zones when both exist for this player -- the zone heatmap stays the
+        # fallback for the (likely more common) case of FBref alone. Checked
+        # independent of `box_score`: Sofascore's points and FBref's box score
+        # come from different scrapers and one can exist without the other.
+        grid = smooth_touch_grid(heatmap_points) if heatmap_points else None
+        if grid is not None:
+            heatmap = smooth_heatmap(grid, width=220, height=280, team_name=name)
+        elif box_score:
+            shares = touch_zone_shares(pd.DataFrame([box_score]))
+            if shares is not None:
+                heatmap = zone_heatmap(shares, width=220, height=280, team_name=name)
+
+    if played and box_score:
         rows.append(("Minutes", _num(box_score.get("minutes")) or "0"))
         rows.append(("Goals", _num(box_score.get("goals")) or "0"))
         rows.append(("Assists", _num(box_score.get("assists")) or "0"))
@@ -543,6 +563,11 @@ def build_match_detail(store, model, match, as_of: datetime,
     matrix = score_matrix(match.expected_home_goals, match.expected_away_goals,
                           model.params.rho)
 
+    ratings = store.player_ratings_as_of(as_of, match.match_id)
+    rating_by_player = (dict(zip(ratings["player_id"], ratings["rating"]))
+                        if not ratings.empty else {})
+    heatmap_points = store.heatmap_points_as_of(as_of, match.match_id)
+
     detail = {
         "matrix": matrix,
         "score": most_likely_score(matrix),
@@ -580,6 +605,13 @@ def build_match_detail(store, model, match, as_of: datetime,
         side_rows = (match_rows[match_rows["team_id"] == team_id]
                     if not match_rows.empty else match_rows)
         touch_shares = touch_zone_shares(side_rows)
+        side_points = (heatmap_points[heatmap_points["team_id"] == team_id]
+                      if not heatmap_points.empty else heatmap_points)
+        smooth_grid = (smooth_touch_grid(list(zip(side_points["x"], side_points["y"])))
+                      if not side_points.empty else None)
+        points_by_player = ({player_id: list(zip(rows["x"], rows["y"]))
+                            for player_id, rows in side_points.groupby("player_id")}
+                           if not side_points.empty else {})
         # Recency per player, so the table can show who is actually playing
         # rather than only who has a rate on file.
         propensity_table = start_propensity(store, team_id, as_of)
@@ -609,7 +641,9 @@ def build_match_detail(store, model, match, as_of: datetime,
                 "modal": _player_modal(
                     player_id, _player_name(player_id, names), _team(team_id),
                     group, stats.get("position") or "", lineup.propensities.get(player_id),
-                    days_since_start, box_score.get(player_id), played),
+                    days_since_start, box_score.get(player_id), played,
+                    rating=rating_by_player.get(player_id),
+                    heatmap_points=points_by_player.get(player_id)),
             })
 
         bench = []
@@ -632,6 +666,7 @@ def build_match_detail(store, model, match, as_of: datetime,
             "absent": sorted(absent),
             "touch_shares": touch_shares,
             "match_rows": side_rows,
+            "smooth_heatmap": smooth_grid,
         }
 
     return detail
@@ -1039,40 +1074,67 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
                              "is less than 55% sure will start. Positions show the named "
                              "shape, not tracked movement.</div>")
 
+    smooth_maps = []
+    smooth_missing = []
     zone_maps = []
     zone_missing = []
     for side in ("home", "away"):
         squad = detail["squads"].get(side)
         if not squad:
             continue
-        shares = squad.get("touch_shares")
         team_name = _team(squad["team_id"])
+
+        grid = squad.get("smooth_heatmap")
+        if grid is None:
+            smooth_missing.append(team_name)
+        else:
+            smooth_maps.append(
+                f'<div class="pitchwrap"><h3>{esc(team_name)}</h3>'
+                + smooth_heatmap(grid, team_name=team_name) + "</div>")
+
+        shares = squad.get("touch_shares")
         if shares is None:
             zone_missing.append(team_name)
-            continue
-        zone_maps.append(
-            f'<div class="pitchwrap"><h3>{esc(team_name)}</h3>'
-            + zone_heatmap(shares, team_name=team_name) + "</div>")
+        else:
+            zone_maps.append(
+                f'<div class="pitchwrap"><h3>{esc(team_name)}</h3>'
+                + zone_heatmap(shares, team_name=team_name) + "</div>")
+
+    heatmap_tab = []
+    if smooth_maps:
+        heatmap_tab.append(
+            '<h3>Walking heatmap</h3>'
+            f'<div class="pitches">{"".join(smooth_maps)}</div>'
+            '<div class="caption">A smoothed density of recorded touch locations, '
+            "from Sofascore -- an unverified source (see the README), finer than "
+            "FBref's zone breakdown below but still a real, ingested set of "
+            "points, not tracking data invented here.</div>")
+        if smooth_missing:
+            heatmap_tab.append(
+                f'<div class="caption">No walking heatmap for '
+                f'{esc(" and ".join(smooth_missing))} yet.</div>')
 
     if zone_maps:
-        heatmap_tab = [f'<div class="pitches">{"".join(zone_maps)}</div>',
-                       '<div class="caption">Share of each side\'s touches by pitch third, '
-                       "from FBref's own zone breakdown -- coarse (three bands) but real, "
-                       "not a smoothed density. Penalty-area counts are subsets of the "
-                       "third they sit in, shown alongside rather than as their own "
-                       "band. A continuous touch map like Sofascore's needs its own, "
-                       "unverified source.</div>"]
+        heatmap_tab.append(
+            '<h3 style="margin-top:18px">Touch zones</h3>'
+            f'<div class="pitches">{"".join(zone_maps)}</div>'
+            '<div class="caption">Share of each side\'s touches by pitch third, '
+            "from FBref's own zone breakdown -- coarse (three bands) but real, "
+            "not a smoothed density. Penalty-area counts are subsets of the "
+            "third they sit in, shown alongside rather than as their own "
+            "band.</div>")
         if zone_missing:
             heatmap_tab.append(
                 f'<div class="caption">No zone data for {esc(" and ".join(zone_missing))} '
                 "yet.</div>")
+
+    if heatmap_tab:
         heatmap_tab = "".join(heatmap_tab)
     else:
         heatmap_tab = (
-            '<div class="empty">No zone-touch data for this match yet -- FBref\'s '
-            "possession table was not ingested, or this match has not been played. "
-            "A smooth touch heatmap like Sofascore's needs its own, unverified "
-            "source.</div>")
+            '<div class="empty">No touch-location data for this match yet -- neither '
+            "FBref's possession table nor a Sofascore heatmap (unverified, see the "
+            "README) has been ingested, or this match has not been played.</div>")
 
     events = detail.get("events", pd.DataFrame())
     ticker_html = _render_ticker(events, match.home_team, match.away_team)

@@ -113,6 +113,57 @@ def test_leakage_report_catches_a_ticker_event_known_before_kickoff(populated_st
     assert violations == 1
 
 
+def test_leakage_report_catches_a_sofascore_rating_known_before_kickoff(populated_store):
+    store = populated_store
+    match_id, kickoff = store.con.execute(
+        "SELECT match_id, kickoff_utc FROM match LIMIT 1").fetchone()
+
+    store.upsert("player_match_rating", pd.DataFrame([{
+        "match_id": match_id, "player_id": "p1", "team_id": "bayern_munich",
+        "source": "sofascore", "rating": 7.5, "known_at": kickoff - timedelta(hours=1),
+    }]), ["match_id", "player_id", "source"])
+
+    report = store.leakage_report()
+    violations = int(report.loc[report["table"] == "player_match_rating", "violations"].iloc[0])
+    assert violations == 1
+
+
+def test_leakage_report_catches_a_heatmap_point_known_before_kickoff(populated_store):
+    store = populated_store
+    match_id, kickoff = store.con.execute(
+        "SELECT match_id, kickoff_utc FROM match LIMIT 1").fetchone()
+
+    store.upsert("player_heatmap_point", pd.DataFrame([{
+        "match_id": match_id, "player_id": "p1", "team_id": "bayern_munich",
+        "source": "sofascore", "sequence": 0, "x": 0.5, "y": 0.5,
+        "known_at": kickoff - timedelta(hours=1),
+    }]), ["match_id", "player_id", "source", "sequence"])
+
+    report = store.leakage_report()
+    violations = int(report.loc[report["table"] == "player_heatmap_point", "violations"].iloc[0])
+    assert violations == 1
+
+
+def test_player_ratings_and_heatmap_points_are_gated_by_as_of(store):
+    """Same point-in-time discipline as everything else: a rebuild mid-match
+    shows only what had actually been published by `as_of`."""
+    kickoff = datetime(2024, 8, 24, 15, 30)
+    known_at = kickoff + timedelta(hours=2)
+    store.upsert("player_match_rating", pd.DataFrame([{
+        "match_id": "m1", "player_id": "p1", "team_id": "bayern_munich",
+        "source": "sofascore", "rating": 7.5, "known_at": known_at,
+    }]), ["match_id", "player_id", "source"])
+    store.upsert("player_heatmap_point", pd.DataFrame([{
+        "match_id": "m1", "player_id": "p1", "team_id": "bayern_munich",
+        "source": "sofascore", "sequence": 0, "x": 0.5, "y": 0.5, "known_at": known_at,
+    }]), ["match_id", "player_id", "source", "sequence"])
+
+    assert store.player_ratings_as_of(kickoff, "m1").empty
+    assert not store.player_ratings_as_of(known_at + timedelta(minutes=1), "m1").empty
+    assert store.heatmap_points_as_of(kickoff, "m1").empty
+    assert not store.heatmap_points_as_of(known_at + timedelta(minutes=1), "m1").empty
+
+
 def test_upsert_is_idempotent(store):
     frame = pd.DataFrame([{
         "match_id": "x", "source": "t", "league": "bundesliga", "season": "2024-25",
