@@ -737,3 +737,73 @@ def test_scorelines_still_render_with_no_player_data_at_all(store):
     assert "No player data for" in page
     assert "Scorelines" in page
     assert 'class="subnav"' in page      # the tabs are still there
+
+
+# ---------------------------------------------------------- zone heatmap
+
+def test_zone_heatmap_draws_three_bands_and_both_boxes():
+    from bet.viz import zone_heatmap
+
+    svg = zone_heatmap({"thirds": {"def": 0.3, "mid": 0.45, "att": 0.25},
+                        "penalty": {"def_pen": 4, "att_pen": 9}, "touches": 120},
+                       team_name="Bayern Munich")
+    assert svg.count("data-tip=") == 3          # one per band
+    assert "25%" in svg and "45%" in svg and "30%" in svg
+    assert "4 in the box" in svg
+    assert "9 in the box" in svg
+    assert 'aria-label="Bayern Munich touch zones"' in svg
+
+
+def test_zone_heatmap_omits_a_penalty_label_that_was_never_ingested():
+    from bet.viz import zone_heatmap
+
+    svg = zone_heatmap({"thirds": {"def": 0.5, "mid": 0.3, "att": 0.2}, "penalty": {}},
+                       team_name="X")
+    assert "in the box" not in svg
+
+
+def test_zone_heatmap_text_stays_legible_at_both_ends_of_the_scale():
+    """The scale runs light-to-dark; white text on the lightest band would be
+    unreadable, and dark ink on the darkest band would be little better."""
+    from bet.viz import zone_heatmap
+
+    heavy = zone_heatmap({"thirds": {"def": 0.05, "mid": 0.05, "att": 0.9},
+                         "penalty": {}})
+    # The heaviest band (90%, saturating well past the 55% reference) must
+    # not still be using dark-on-dark text.
+    assert 'fill="var(--ink)">90%' not in heavy
+    assert 'fill="#fff">90%' in heavy
+    light = zone_heatmap({"thirds": {"def": 0.02, "mid": 0.02, "att": 0.96},
+                         "penalty": {}})
+    assert 'fill="#fff">2%' not in light
+
+
+# --------------------------------------------------- top-level nav collision
+
+def test_a_matchs_subnav_is_not_matched_by_the_top_level_tab_selector(store_with_players):
+    """Reported: clicking Formation/Heatmaps/Ticker closed the whole fixture,
+    and the team stats below it vanished too.
+
+    The top-level tab bar's own script binds a click handler to every literal
+    `<nav>` element on the page via `document.querySelectorAll('nav button')`,
+    on the assumption there is exactly one. The per-fixture sub-tab switcher
+    was also marked up as a `<nav>`, so that same query matched it too, and
+    its handler reset every `.view` -- including `#fixtures` itself, with the
+    fixture already open -- by the top-level convention this button's
+    `data-subview` does not carry. That query is a stand-in for the real
+    `document.querySelectorAll('nav button')` the page runs; it must return
+    only the site's own tab bar, never a fixture's internal switcher.
+    """
+    from bs4 import BeautifulSoup
+
+    page = build(store_with_players, datetime(2024, 1, 5), days=8)
+    soup = BeautifulSoup(page, "lxml")
+
+    top_level = soup.select("nav button")
+    assert {b.get("data-view") for b in top_level} == {
+        "overview", "fixtures", "model", "props"}
+
+    # The sub-tab switcher must still exist and still be labelled a tablist --
+    # it is just not allowed to be a second <nav> landmark.
+    assert soup.select_one(".subnav[role='tablist']") is not None
+    assert soup.select_one("nav .subnav") is None

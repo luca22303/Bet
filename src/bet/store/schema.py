@@ -167,6 +167,14 @@ CREATE TABLE IF NOT EXISTS player_match_stat (
     passes_attempted    DOUBLE,
     progressive_passes  DOUBLE,
     touches             DOUBLE,
+    -- FBref's own pitch-zone breakdown of that total: coarse (five zones),
+    -- but real touch-location data, unlike anything derived from tracking.
+    -- Feeds the zone heatmap; None on any row ingested before this existed.
+    touches_def_pen     DOUBLE,
+    touches_def_third   DOUBLE,
+    touches_mid_third   DOUBLE,
+    touches_att_third   DOUBLE,
+    touches_att_pen     DOUBLE,
     carries             DOUBLE,
     tackles             DOUBLE,
     interceptions       DOUBLE,
@@ -243,7 +251,25 @@ DROPPED_INDEXES = (
     "idx_rating_team",
 )
 
-MIGRATIONS = "\n".join(f"DROP INDEX IF EXISTS {name};" for name in DROPPED_INDEXES)
+
+# Columns added to an existing table after it first shipped. `CREATE TABLE IF
+# NOT EXISTS` does nothing to a table that already exists, so a store created
+# before one of these was added would otherwise never gain it -- the zone
+# heatmap columns, say, silently missing from a database ingested months ago
+# with no error to say why the heatmap tab stays empty.
+ADDED_COLUMNS = (
+    ("player_match_stat", "touches_def_pen", "DOUBLE"),
+    ("player_match_stat", "touches_def_third", "DOUBLE"),
+    ("player_match_stat", "touches_mid_third", "DOUBLE"),
+    ("player_match_stat", "touches_att_third", "DOUBLE"),
+    ("player_match_stat", "touches_att_pen", "DOUBLE"),
+)
+
+MIGRATIONS = "\n".join(
+    [f"DROP INDEX IF EXISTS {name};" for name in DROPPED_INDEXES]
+    + [f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind};"
+       for table, column, kind in ADDED_COLUMNS]
+)
 
 # Tables that carry point-in-time facts, checked by the leakage guard.
 PIT_TABLES = ("match", "match_result", "odds_quote", "team_rating", "shot",

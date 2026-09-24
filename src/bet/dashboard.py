@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from bet.config import GERMAN_STAKE_TAX, OUTCOMES
+from bet.spatial.pitch import touch_zone_shares
 from bet.viz import (
     Series,
     diverging_bar,
@@ -33,6 +34,7 @@ from bet.viz import (
     pitch,
     scatter,
     stat_tile,
+    zone_heatmap,
 )
 
 STYLE = """
@@ -295,6 +297,7 @@ SCRIPT = """
   var pmName = document.getElementById('pm-name');
   var pmTeam = document.getElementById('pm-team');
   var pmRows = document.getElementById('pm-rows');
+  var pmHeatmap = document.getElementById('pm-heatmap');
   var pmNote = document.getElementById('pm-note');
 
   function openPlayerModal(payload){
@@ -305,6 +308,8 @@ SCRIPT = """
     pmRows.innerHTML = (data.rows || []).map(function(row){
       return '<div><span>' + row[0] + '</span><b>' + row[1] + '</b></div>';
     }).join('');
+    pmHeatmap.innerHTML = data.heatmap || '';
+    pmHeatmap.style.display = data.heatmap ? '' : 'none';
     pmNote.textContent = data.note || '';
     pmNote.style.display = data.note ? '' : 'none';
     backdrop.hidden = false;
@@ -374,6 +379,11 @@ def _player_modal(player_id: str, name: str, team: str, group: str, position: st
     as if it were this match's number.
     """
     rows: list[tuple[str, str]] = [("Position", position or group.replace("_", " ").title())]
+    heatmap = None
+    if played and box_score:
+        shares = touch_zone_shares(pd.DataFrame([box_score]))
+        if shares is not None:
+            heatmap = zone_heatmap(shares, width=220, height=280, team_name=name)
 
     if played and box_score:
         rows.append(("Minutes", _num(box_score.get("minutes")) or "0"))
@@ -414,7 +424,7 @@ def _player_modal(player_id: str, name: str, team: str, group: str, position: st
         note = ("Not played yet -- these are the rolling per-90 rates behind the "
                 "prediction, not this match's own numbers.")
 
-    return {"name": name, "team": team, "rows": rows, "note": note}
+    return {"name": name, "team": team, "rows": rows, "note": note, "heatmap": heatmap}
 
 
 # ----------------------------------------------------------- expected score
@@ -504,6 +514,7 @@ def build_match_detail(store, model, match, as_of: datetime,
     # at rather than presenting a rate as though it were this match's number.
     played = match.actual_outcome is not None
     box_score: dict[str, dict] = {}
+    match_rows = pd.DataFrame()
     if played:
         all_ids = list(match.lineups.get("home").starters if match.lineups.get("home") else []) + \
                   list(match.lineups.get("home").bench if match.lineups.get("home") else []) + \
@@ -512,9 +523,9 @@ def build_match_detail(store, model, match, as_of: datetime,
         if all_ids:
             actual = store.player_stats_as_of(as_of, player_ids=all_ids)
             if not actual.empty:
-                actual = actual[actual["match_id"] == match.match_id]
+                match_rows = actual[actual["match_id"] == match.match_id]
                 box_score = {row.player_id: row._asdict()
-                            for row in actual.itertuples(index=False)}
+                            for row in match_rows.itertuples(index=False)}
 
     for side, team_id in (("home", match.home_team), ("away", match.away_team)):
         lineup = match.lineups.get(side)
@@ -522,6 +533,9 @@ def build_match_detail(store, model, match, as_of: datetime,
             continue
 
         absent = set(match.absences.get(side, []))
+        side_rows = (match_rows[match_rows["team_id"] == team_id]
+                    if not match_rows.empty else match_rows)
+        touch_shares = touch_zone_shares(side_rows)
         # Recency per player, so the table can show who is actually playing
         # rather than only who has a rate on file.
         propensity_table = start_propensity(store, team_id, as_of)
@@ -572,6 +586,7 @@ def build_match_detail(store, model, match, as_of: datetime,
             "players": players,
             "bench": bench,
             "absent": sorted(absent),
+            "touch_shares": touch_shares,
         }
 
     return detail
@@ -881,11 +896,40 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
                              "is less than 55% sure will start. Positions show the named "
                              "shape, not tracked movement.</div>")
 
-    heatmap_tab = (
-        '<div class="empty">Heatmaps need touch-location data no source ingested '
-        "here currently provides. A coarse zone-based version (FBref's six pitch "
-        "zones per player) is planned; a smooth touch heatmap like Sofascore's "
-        "needs its own, unverified source.</div>")
+    zone_maps = []
+    zone_missing = []
+    for side in ("home", "away"):
+        squad = detail["squads"].get(side)
+        if not squad:
+            continue
+        shares = squad.get("touch_shares")
+        team_name = _team(squad["team_id"])
+        if shares is None:
+            zone_missing.append(team_name)
+            continue
+        zone_maps.append(
+            f'<div class="pitchwrap"><h3>{esc(team_name)}</h3>'
+            + zone_heatmap(shares, team_name=team_name) + "</div>")
+
+    if zone_maps:
+        heatmap_tab = [f'<div class="pitches">{"".join(zone_maps)}</div>',
+                       '<div class="caption">Share of each side\'s touches by pitch third, '
+                       "from FBref's own zone breakdown -- coarse (three bands) but real, "
+                       "not a smoothed density. Penalty-area counts are subsets of the "
+                       "third they sit in, shown alongside rather than as their own "
+                       "band. A continuous touch map like Sofascore's needs its own, "
+                       "unverified source.</div>"]
+        if zone_missing:
+            heatmap_tab.append(
+                f'<div class="caption">No zone data for {esc(" and ".join(zone_missing))} '
+                "yet.</div>")
+        heatmap_tab = "".join(heatmap_tab)
+    else:
+        heatmap_tab = (
+            '<div class="empty">No zone-touch data for this match yet -- FBref\'s '
+            "possession table was not ingested, or this match has not been played. "
+            "A smooth touch heatmap like Sofascore's needs its own, unverified "
+            "source.</div>")
 
     ticker_tab = (
         '<div class="empty">No live play-by-play source is ingested yet. Planned '
@@ -894,11 +938,19 @@ def _match_detail_html(match, detail: dict | None, index: int) -> str:
         "line-up scraper already is.</div>")
 
     parts.append(
-        f'<div class="subtabs"><nav class="subnav" role="tablist">'
+        # Plain div, not <nav>: the top-level tab bar's own script matches
+        # every literal <nav> element on the page with `nav button`, and a
+        # second <nav> here was being picked up by it too. Its listener then
+        # reset every .view (including #fixtures itself, mid-detail-view) by
+        # the top-level tab convention, which this button's `data-subview`
+        # does not carry -- collapsing the whole open fixture, not just
+        # switching its Formation/Heatmaps/Ticker content. `role="tablist"`
+        # already says what this is; it does not need the landmark tag too.
+        f'<div class="subtabs"><div class="subnav" role="tablist">'
         f'<button data-subview="{uid}-formation" aria-selected="true">Formation</button>'
         f'<button data-subview="{uid}-heatmaps" aria-selected="false">Heatmaps</button>'
         f'<button data-subview="{uid}-ticker" aria-selected="false">Ticker</button>'
-        f'</nav>'
+        f'</div>'
         f'<div class="subview on" id="{uid}-formation">{"".join(formation_tab)}</div>'
         f'<div class="subview" id="{uid}-heatmaps">{heatmap_tab}</div>'
         f'<div class="subview" id="{uid}-ticker">{ticker_tab}</div>'
@@ -1242,6 +1294,7 @@ def render(store, brief, *, previous=None, previous_details: dict | None = None,
     <h3 id="pm-name"></h3>
     <div id="pm-team" class="kick"></div>
     <div id="pm-rows" class="meta" style="display:block;margin-top:10px"></div>
+    <div id="pm-heatmap" style="text-align:center;margin-top:10px"></div>
     <div id="pm-note" class="note"></div>
   </div>
 </div>

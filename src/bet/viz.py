@@ -366,6 +366,94 @@ def assign_to_formation(formation: str, players: list[dict]) -> list[dict]:
     return placed
 
 
+# The validated sequential pair from the reference palette (--seq-100 /
+# --seq-450 in the dashboard's own CSS), interpolated here in Python rather
+# than with CSS color-mix so the label contrast below can be computed against
+# the exact colour actually drawn, band by band.
+_SEQ_LOW = (0xCD, 0xE2, 0xFB)
+_SEQ_HIGH = (0x2A, 0x78, 0xD6)
+
+
+def _seq_color(intensity: float) -> tuple[str, str]:
+    """A colour along the sequential scale for `intensity` in [0, 1], and
+    which ink -- dark or the surface white -- reads on top of it."""
+    t = max(0.0, min(1.0, intensity))
+    rgb = tuple(round(lo + (hi - lo) * t) for lo, hi in zip(_SEQ_LOW, _SEQ_HIGH))
+
+    def channel(v: int) -> float:
+        v = v / 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    luminance = 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+    ink = "var(--ink)" if luminance > 0.4 else "#fff"
+    return "#{:02x}{:02x}{:02x}".format(*rgb), ink
+
+
+def zone_heatmap(shares: dict, *, width: int = 300, height: int = 400,
+                 team_name: str = "") -> str:
+    """Three horizontal bands, shaded by share of touches, attacking upward.
+
+    `shares` is `bet.spatial.pitch.touch_zone_shares`'s own return shape.
+    Coarse by construction -- FBref's zone breakdown has three bands, not a
+    continuous surface -- so this reads as a small number of honestly blocky
+    regions rather than a smoothed density the data cannot support. Penalty-
+    area touches are shown as a count beside each box instead of a fourth and
+    fifth band: they are subsets of the thirds already drawn, not disjoint
+    from them.
+    """
+    thirds = shares.get("thirds", {})
+    penalty = shares.get("penalty", {})
+
+    margin = 16
+    play_w = width - margin * 2
+    play_h = height - margin * 2
+    band_h = play_h / 3.0
+
+    parts = [f'<svg viewBox="0 0 {width} {height}" class="pitch" role="img" '
+             f'aria-label="{esc(team_name)} touch zones">']
+    parts.append(f'<rect class="turf" x="{margin}" y="{margin}" width="{play_w}" '
+                 f'height="{play_h}" rx="4"/>')
+
+    # Attacking third at the top, matching the formation pitch's own
+    # "attacking upward" convention so the two read as the same orientation.
+    for i, (key, label) in enumerate((("att", "Attacking third"),
+                                      ("mid", "Middle third"),
+                                      ("def", "Defensive third"))):
+        share = thirds.get(key, 0.0)
+        y = margin + i * band_h
+        # A third with an exactly even share of the ball is ~33%; 55% is
+        # already a heavy concentration, so the scale saturates there rather
+        # than needing an implausible 100% to reach full colour.
+        fill, ink = _seq_color(share / 0.55)
+        parts.append(f'<rect x="{margin}" y="{y:.1f}" width="{play_w}" height="{band_h:.1f}" '
+                     f'fill="{fill}" data-tip="{esc(label)} &middot; {share:.0%} of touches"/>')
+        parts.append(f'<text x="{width / 2}" y="{y + band_h / 2 + 4:.1f}" text-anchor="middle" '
+                     f'font-size="13" font-weight="600" fill="{ink}">{share:.0%}</text>')
+
+    # Pitch markings drawn last, over the bands, so they still read.
+    mid_y = margin + play_h / 2
+    parts.append(f'<line class="pitchline" x1="{margin}" y1="{mid_y:.1f}" '
+                 f'x2="{margin + play_w}" y2="{mid_y:.1f}"/>')
+    parts.append(f'<circle class="pitchline" cx="{width / 2}" cy="{mid_y:.1f}" r="26" fill="none"/>')
+    box_w, box_h = play_w * 0.56, play_h * 0.12
+    box_x = (width - box_w) / 2
+    parts.append(f'<rect class="pitchline" x="{box_x:.1f}" y="{margin:.1f}" '
+                 f'width="{box_w:.1f}" height="{box_h:.1f}" fill="none"/>')
+    parts.append(f'<rect class="pitchline" x="{box_x:.1f}" y="{margin + play_h - box_h:.1f}" '
+                 f'width="{box_w:.1f}" height="{box_h:.1f}" fill="none"/>')
+
+    if "att_pen" in penalty:
+        parts.append(f'<text class="benchlabel" x="{width / 2}" y="{margin + box_h + 12:.1f}" '
+                     f'text-anchor="middle">{int(penalty["att_pen"])} in the box</text>')
+    if "def_pen" in penalty:
+        parts.append(f'<text class="benchlabel" x="{width / 2}" '
+                     f'y="{margin + play_h - box_h - 6:.1f}" text-anchor="middle">'
+                     f'{int(penalty["def_pen"])} in the box</text>')
+
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def pitch(formation: str, players: list[dict], *, width: int = 300,
           height: int = 400, team_name: str = "", confirmed: bool = False) -> str:
     """A formation drawn on a pitch, attacking upward.

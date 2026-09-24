@@ -10,6 +10,7 @@ from bet.spatial.pitch import (
     heatmap_to_frame,
     shot_map,
     shot_profile,
+    touch_zone_shares,
     zone_of,
 )
 
@@ -105,3 +106,76 @@ def test_shots_outside_the_pitch_are_clipped_not_dropped():
     odd = pd.DataFrame({"team_id": ["a", "a"], "x": [1.5, -0.2], "y": [0.5, 0.5],
                         "xg": [0.1, 0.1]})
     assert bin_heatmap(odd).sum() == pytest.approx(1.0)
+
+
+# ----------------------------------------------------------- touch zones
+
+def test_touch_zone_shares_sum_to_one():
+    rows = pd.DataFrame({
+        "touches_def_third": [20, 10], "touches_mid_third": [30, 5],
+        "touches_att_third": [10, 5], "touches_def_pen": [3, 1],
+        "touches_att_pen": [1, 0],
+    })
+    result = touch_zone_shares(rows)
+    assert set(result["thirds"]) == {"def", "mid", "att"}
+    assert sum(result["thirds"].values()) == pytest.approx(1.0)
+    assert result["thirds"]["mid"] > result["thirds"]["att"]
+
+
+def test_penalty_area_counts_are_reported_separately_not_as_a_share():
+    """A touch in the box is also a touch in that third -- not a fourth,
+    disjoint zone -- so it must not be folded into the three shares."""
+    rows = pd.DataFrame({
+        "touches_def_third": [20], "touches_mid_third": [30], "touches_att_third": [10],
+        "touches_def_pen": [5], "touches_att_pen": [2],
+    })
+    result = touch_zone_shares(rows)
+    assert result["penalty"] == {"def_pen": 5.0, "att_pen": 2.0}
+    assert set(result["thirds"]) == {"def", "mid", "att"}
+
+
+def test_none_when_the_zone_columns_were_never_ingested():
+    """Every zone column null -- not merely zero -- means this team was never
+    covered by the possession table at all, which must read differently from
+    a real, if uneventful, match."""
+    rows = pd.DataFrame({
+        "touches_def_third": [None, None], "touches_mid_third": [None, None],
+        "touches_att_third": [None, None],
+    })
+    assert touch_zone_shares(rows) is None
+
+
+def test_none_when_the_columns_are_entirely_missing():
+    assert touch_zone_shares(pd.DataFrame({"other": [1, 2]})) is None
+
+
+def test_none_on_an_empty_frame():
+    assert touch_zone_shares(pd.DataFrame()) is None
+
+
+def test_a_zero_touch_match_is_not_mistaken_for_no_data():
+    """A real zero (an unused substitute) is still a real, ingested number,
+    distinguishable from data that was never collected."""
+    rows = pd.DataFrame({
+        "touches_def_third": [0], "touches_mid_third": [0], "touches_att_third": [0],
+    })
+    assert touch_zone_shares(rows) is None      # grand_total is 0: nothing to share
+
+
+def test_penalty_area_is_omitted_when_not_present_rather_than_zeroed():
+    rows = pd.DataFrame({
+        "touches_def_third": [5], "touches_mid_third": [5], "touches_att_third": [5],
+    })
+    result = touch_zone_shares(rows)
+    assert result["penalty"] == {}
+
+
+def test_touch_zone_shares_aggregates_several_players():
+    """A team-level heatmap sums across every player's row."""
+    rows = pd.DataFrame({
+        "touches_def_third": [10, 10, 10], "touches_mid_third": [5, 5, 5],
+        "touches_att_third": [0, 0, 0],
+    })
+    result = touch_zone_shares(rows)
+    assert result["touches"] == 45
+    assert result["thirds"]["def"] == pytest.approx(30 / 45)

@@ -149,6 +149,54 @@ def shot_profile(shots: pd.DataFrame, team_id: str | None = None) -> dict[str, f
     }
 
 
+# The three columns FBref's possession table reports that genuinely
+# partition the pitch -- every touch falls in exactly one -- so their shares
+# sum to one and can be drawn as adjacent, non-overlapping bands.
+PITCH_THIRD_COLUMNS = ("touches_def_third", "touches_mid_third", "touches_att_third")
+
+# The penalty-area columns are not a fourth and fifth independent zone: a
+# touch in the box is also a touch in that third, so these are subsets
+# already counted inside PITCH_THIRD_COLUMNS, not disjoint from them.
+PENALTY_AREA_COLUMNS = ("touches_def_pen", "touches_att_pen")
+
+
+def touch_zone_shares(rows: pd.DataFrame) -> dict | None:
+    """Share of touches in each pitch third, from FBref's own zone breakdown.
+
+    Coarse by construction -- three bands, not a continuous surface -- but a
+    real, ingested number rather than anything modelled or guessed. `rows` is
+    one or more `player_match_stat`-shaped rows: a single player's for the
+    click-through detail, a whole team's for the match-level heatmap tab.
+
+    Def Pen and Att Pen are reported alongside as penalty-area counts, not
+    folded in as a fourth and fifth share -- see `PENALTY_AREA_COLUMNS`.
+
+    `None` when nothing here has ever gone through the possession table --
+    every zone column null, not merely zero -- so a team never covered by it
+    is not drawn as though it played out of exactly no space.
+    """
+    zone_cols = list(PITCH_THIRD_COLUMNS)
+    if rows.empty or not all(c in rows.columns for c in zone_cols):
+        return None
+    if rows[zone_cols].isna().all(axis=None):
+        return None
+
+    totals = {c: float(rows[c].fillna(0.0).sum()) for c in zone_cols}
+    grand_total = sum(totals.values())
+    if grand_total <= 0:
+        return None
+
+    shares = {c.removeprefix("touches_").removesuffix("_third"): totals[c] / grand_total
+             for c in zone_cols}
+
+    penalty = {}
+    for c in PENALTY_AREA_COLUMNS:
+        if c in rows.columns and rows[c].notna().any():
+            penalty[c.removeprefix("touches_")] = float(rows[c].fillna(0.0).sum())
+
+    return {"thirds": shares, "penalty": penalty, "touches": grand_total}
+
+
 def heatmap_to_frame(grid: np.ndarray) -> pd.DataFrame:
     """Long-format grid, ready to plot."""
     x_bins, y_bins = grid.shape

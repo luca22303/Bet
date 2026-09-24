@@ -320,3 +320,77 @@ def test_diagnose_checks_every_kicker_strategy_not_just_the_winner():
     assert "strategy: embedded-json" in steps
     assert "strategy: markup" in steps
     assert "strategy: generic" in steps
+
+
+def _possession_table(table_id, prefix, count=12):
+    """A possession-table page fragment sharing the same player identities as
+    `_player_table`, so its rows merge into the same records rather than
+    creating twelve phantom extra players."""
+    rows = "".join(
+        f'<tr><th><a href="/en/players/{abs(hash(prefix)) % 0xffff:04x}{i:04x}/x">'
+        f'{prefix} P{i}</a></th><td>90</td>'
+        f"<td>{40 + i}</td><td>{5 + i % 3}</td><td>{10 + i}</td><td>{12 + i}</td>"
+        f"<td>{8 + i}</td><td>{5 + i}</td></tr>"
+        for i in range(count))
+    attr = f' id="{table_id}"' if table_id else ""
+    return (f"<table{attr}><thead>"
+            '<tr><th colspan="2"></th><th colspan="6">Touches</th></tr>'
+            "<tr><th>Player</th><th>Min</th><th>Touches</th><th>Def Pen</th>"
+            "<th>Def 3rd</th><th>Mid 3rd</th><th>Att 3rd</th><th>Att Pen</th></tr>"
+            "</thead>"
+            f"<tbody>{rows}</tbody>"
+            "<tfoot><tr><th>12 Players</th><td></td><td></td><td></td>"
+            "<td></td><td></td><td></td></tr></tfoot></table>")
+
+
+def test_the_possession_tables_zone_touches_merge_into_the_summary_row(store):
+    """The heatmap's whole data source: FBref's own coarse pitch-zone
+    breakdown, read from a second table for the same players already parsed
+    from the summary one, not a second set of phantom players."""
+    from bet.ingest.base import IngestResult
+    from bet.ingest.fbref import FBrefSource
+
+    page = ("<html><head><title>Bayern Munich vs Wolfsburg Match Report | FBref"
+            "</title></head><body>"
+            '<span class="venuetime" data-venue-epoch="1724510400"></span>'
+            + _player_table("stats_abc12345_summary", "BAY")
+            + _possession_table("stats_abc12345_possession", "BAY")
+            + _player_table("stats_def67890_summary", "WOL")
+            + _possession_table("stats_def67890_possession", "WOL")
+            + "</body></html>")
+
+    source = FBrefSource(store, raw_dir="/tmp", delay=0)
+    players, stats = source._parse_match_page(
+        page, "bundesliga", "2024-25", IngestResult(source="fbref"))
+
+    assert len(stats) == 24                        # still 12 a side, no doubling
+    bay_gk = next(s for s in stats if s["team_id"] == "bayern_munich" and s["position"] == "GK")
+    # Row 0 (the goalkeeper): min=90, touches=40, def_pen=5, def_3rd=10,
+    # mid_3rd=12, att_3rd=8, att_pen=5, in the possession table's own order.
+    assert bay_gk["touches_def_pen"] == 5
+    assert bay_gk["touches_def_third"] == 10
+    assert bay_gk["touches_mid_third"] == 12
+    assert bay_gk["touches_att_third"] == 8
+    assert bay_gk["touches_att_pen"] == 5
+    # The total from the possession table's own "Touches" column agrees with
+    # whichever table supplied it first, rather than the two disagreeing.
+    assert bay_gk["touches"] is not None
+
+
+def test_a_page_without_a_possession_table_leaves_zone_touches_null(store):
+    """None must mean 'not parsed', distinguishable from a real zero -- a page
+    predating this, or one where the table genuinely is not there."""
+    from bet.ingest.base import IngestResult
+    from bet.ingest.fbref import FBrefSource
+
+    page = ("<html><head><title>Bayern Munich vs Wolfsburg Match Report | FBref"
+            "</title></head><body>"
+            '<span class="venuetime" data-venue-epoch="1724510400"></span>'
+            + _player_table("stats_abc12345_summary", "BAY")
+            + _player_table("stats_def67890_summary", "WOL")
+            + "</body></html>")
+
+    source = FBrefSource(store, raw_dir="/tmp", delay=0)
+    _, stats = source._parse_match_page(
+        page, "bundesliga", "2024-25", IngestResult(source="fbref"))
+    assert all(s["touches_def_pen"] is None for s in stats)

@@ -70,3 +70,26 @@ def test_column_map_targets_are_real_schema_columns():
     from bet.ingest.fbref import NUMERIC_COLUMNS
     for target in COLUMN_MAP.values():
         assert target in NUMERIC_COLUMNS, target
+
+
+def test_touch_zone_headers_flatten_and_map_to_real_columns():
+    """FBref's own pitch-zone breakdown of touches, from the possession table.
+
+    'Touches' repeats as both the group header and the total column's own
+    label -- the case `flatten_columns` collapses to the bare name -- so only
+    the five zone columns need their own entry in COLUMN_MAP.
+    """
+    from bet.ingest.fbref import NUMERIC_COLUMNS, TOUCH_ZONE_COLUMNS
+
+    frame = pd.DataFrame([[1, 2, 3, 4, 5, 6]], columns=pd.MultiIndex.from_tuples([
+        ("Touches", "Touches"), ("Touches", "Def Pen"), ("Touches", "Def 3rd"),
+        ("Touches", "Mid 3rd"), ("Touches", "Att 3rd"), ("Touches", "Att Pen"),
+    ]))
+    columns = list(flatten_columns(frame).columns)
+    assert columns == ["touches", "touches_def_pen", "touches_def_3rd",
+                       "touches_mid_3rd", "touches_att_3rd", "touches_att_pen"]
+
+    for flattened in columns[1:]:                # skip the plain total
+        assert flattened in COLUMN_MAP, flattened
+        assert COLUMN_MAP[flattened] in TOUCH_ZONE_COLUMNS
+        assert COLUMN_MAP[flattened] in NUMERIC_COLUMNS

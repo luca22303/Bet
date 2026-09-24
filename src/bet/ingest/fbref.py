@@ -52,6 +52,9 @@ COLUMN_MAP = {
     "performance_crdy": "yellow_cards",
     "performance_crdr": "red_cards",
     "performance_touches": "touches",
+    # The possession table's own "Touches" total, bare because the group
+    # header and this column's own label are both literally "Touches".
+    "touches": "touches",
     "performance_tkl": "tackles",
     "performance_int": "interceptions",
     "performance_blocks": "blocks",
@@ -70,13 +73,31 @@ COLUMN_MAP = {
     "fls": "fouls",
     "sh": "shots",
     "sot": "shots_on_target",
+    # The possession table's own pitch-zone breakdown of "Touches", which the
+    # summary table only ever gives as one total. "Touches" repeats as both
+    # the group header and the total column's own label, so it flattens to
+    # plain `touches` and needs no separate mapping -- only the five zones do.
+    "touches_def_pen": "touches_def_pen",
+    "touches_def_3rd": "touches_def_third",
+    "touches_mid_3rd": "touches_mid_third",
+    "touches_att_3rd": "touches_att_third",
+    "touches_att_pen": "touches_att_pen",
 }
+
+# The zone columns, listed separately from NUMERIC_COLUMNS below: a heatmap
+# needs to tell "this player had zero touches in the box" from "this match
+# page predates the possession table being parsed at all", and only None
+# means the latter.
+TOUCH_ZONE_COLUMNS = [
+    "touches_def_pen", "touches_def_third", "touches_mid_third",
+    "touches_att_third", "touches_att_pen",
+]
 
 NUMERIC_COLUMNS = [
     "minutes", "goals", "assists", "shots", "shots_on_target", "xg", "npxg", "xa",
     "passes_completed", "passes_attempted", "progressive_passes", "touches",
     "carries", "tackles", "interceptions", "blocks", "fouls",
-    "yellow_cards", "red_cards",
+    "yellow_cards", "red_cards", *TOUCH_ZONE_COLUMNS,
 ]
 
 
