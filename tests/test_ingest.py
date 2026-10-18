@@ -27,13 +27,23 @@ def test_season_helpers():
 
 
 def test_kickoff_parsing_handles_both_date_formats():
-    assert _parse_kickoff("24/08/2024", "15:30") == datetime(2024, 8, 24, 15, 30)
-    assert _parse_kickoff("24/08/24", "15:30") == datetime(2024, 8, 24, 15, 30)
+    """football-data.co.uk times are UK local (GMT/BST), not UTC -- 15:30 BST
+    (August) is 14:30 UTC. Converting through Europe/London rather than
+    assuming UTC is what keeps this correct across the whole season."""
+    assert _parse_kickoff("24/08/2024", "15:30") == datetime(2024, 8, 24, 14, 30)
+    assert _parse_kickoff("24/08/24", "15:30") == datetime(2024, 8, 24, 14, 30)
+
+
+def test_kickoff_parsing_handles_winter_gmt_with_no_dst_offset():
+    """In GMT (winter), UK local time already equals UTC -- no shift."""
+    assert _parse_kickoff("30/11/2024", "15:30") == datetime(2024, 11, 30, 15, 30)
 
 
 def test_kickoff_defaults_when_old_files_omit_the_time():
-    # Files before roughly 2019 carry no Time column.
-    assert _parse_kickoff("24/08/2015", None) == datetime(2015, 8, 24, 15, 0)
+    # Files before roughly 2019 carry no Time column. The default is
+    # deliberately late (21:00 UK local, not a typical mid-afternoon guess)
+    # so a real evening kickoff still lands before it, not after.
+    assert _parse_kickoff("24/08/2015", None) == datetime(2015, 8, 24, 20, 0)
 
 
 def test_football_data_parsing_loads_matches_results_and_odds(store, tmp_path):

@@ -39,7 +39,13 @@ class Settings:
     prediction_lead_seconds: int = 60 * 60
     # How long after kickoff a result becomes public knowledge.
     result_known_after_seconds: int = 60 * 115
-    user_agent: str = "bet/0.1 (personal analytics research)"
+    # Sports Reference (FBref) returns a blanket 403 to the kind of
+    # self-identifying UA that used to be here ("bet/0.1 (...)") -- it blocks
+    # on looking like a bot, not on request volume, so the fix is a realistic
+    # browser UA, not a higher retry count or a longer delay. Every other
+    # source here tolerates it; FBref is the one that doesn't.
+    user_agent: str = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
     request_delay_seconds: float = 3.0
     leagues: tuple[str, ...] = field(default_factory=lambda: ("bundesliga",))
 

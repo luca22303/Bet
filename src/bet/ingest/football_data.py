@@ -19,7 +19,8 @@ Column conventions in these files:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,21 @@ import pandas as pd
 from bet.config import FOOTBALL_DATA_LEAGUES, SETTINGS
 from bet.ingest.base import IngestResult, Source, make_match_id, season_code, season_label
 from bet.teams import UnknownTeamError, resolve
+
+# football-data.co.uk publishes its "Time" column in UK local time (GMT/BST),
+# not the match's own local time and not true UTC, even for continental
+# leagues -- a convention left over from the site's English-football origins.
+# Treating it as UTC directly (as this used to) silently overstates every
+# summer-time kickoff by an hour, which a second source correcting the same
+# match_id's kickoff_utc (OpenLigaDB gives true UTC) then exposes as a closing
+# price "known" after kickoff -- the exact leak the point-in-time guard exists
+# to catch. The UK and Germany share the EU's daylight-saving calendar, so
+# this offset is stable across the season rather than something that drifts.
+_UK_TZ = ZoneInfo("Europe/London")
+
+
+def _to_utc(local: datetime) -> datetime:
+    return local.replace(tzinfo=_UK_TZ).astimezone(timezone.utc).replace(tzinfo=None)
 
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
 
@@ -50,11 +66,14 @@ OPENING_ODDS_COLUMNS = {
 
 
 def _parse_kickoff(date_value, time_value) -> datetime | None:
-    """Parse the dd/mm/yy(yy) date plus optional HH:MM time.
+    """Parse the dd/mm/yy(yy) date plus optional HH:MM time, as true UTC.
 
-    Files before roughly 2019 carry no kickoff time; those default to 15:00 UTC,
-    a typical Saturday afternoon slot. The imprecision is harmless because the
-    prediction cut-off is an hour out and matchdays are clustered anyway.
+    Files before roughly 2019 carry no kickoff time. Those default to 21:00
+    UK local -- deliberately late in the day rather than a typical mid-afternoon
+    guess, so that a real evening kickoff (Bundesliga plays as late as 20:30
+    local on a Friday) still lands before this placeholder once converted, not
+    after it. Being late by a few hours is harmless; being early leaks a
+    result or odds as knowable before the match actually finished.
     """
     if pd.isna(date_value):
         return None
@@ -69,12 +88,12 @@ def _parse_kickoff(date_value, time_value) -> datetime | None:
         return None
 
     if pd.isna(time_value) or not str(time_value).strip():
-        return date.replace(hour=15, minute=0)
+        return _to_utc(date.replace(hour=21, minute=0))
     try:
         hh, mm = str(time_value).strip().split(":")[:2]
-        return date.replace(hour=int(hh), minute=int(mm))
+        return _to_utc(date.replace(hour=int(hh), minute=int(mm)))
     except (ValueError, IndexError):
-        return date.replace(hour=15, minute=0)
+        return _to_utc(date.replace(hour=21, minute=0))
 
 
 class FootballDataSource(Source):
