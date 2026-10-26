@@ -19,6 +19,7 @@
     bet diagnose --source fbref     report what a scraped page actually contains
     bet status                      row counts and the leakage check
     bet check                       point-in-time integrity only
+    bet kickbase-advice             who to buy, sell and trust in your Kickbase squad
 """
 
 from __future__ import annotations
@@ -660,6 +661,78 @@ def cmd_check(args) -> int:
         return 1 if int(report["violations"].sum()) else 0
 
 
+def cmd_kickbase(args) -> int:
+    from bet.kickbase.advisor import (
+        most_consistent,
+        parse_player,
+        rank_buy_candidates,
+        rank_sell_candidates,
+    )
+    from bet.kickbase.client import KickbaseClient, KickbaseError
+
+    try:
+        client = KickbaseClient()
+        client.login()
+        leagues = client.leagues()
+    except KickbaseError as exc:
+        print(f"kickbase: {exc}")
+        return 1
+
+    if not leagues:
+        print("kickbase: this account has no leagues")
+        return 1
+
+    league_id = args.league_id
+    if league_id is None:
+        if len(leagues) > 1:
+            print("more than one league on this account; pick one with --league-id:")
+            for lg in leagues:
+                print(f"  {lg.get('id') or lg.get('i')}: {lg.get('name') or lg.get('n')}")
+            return 1
+        league_id = str(leagues[0].get("id") or leagues[0].get("i"))
+
+    try:
+        squad = [parse_player(p) for p in client.squad(league_id)]
+        market = [parse_player(p) for p in client.market(league_id)]
+    except KickbaseError as exc:
+        print(f"kickbase: {exc}")
+        return 1
+
+    budget = args.budget if args.budget is not None else float("inf")
+
+    print(f"=== Buy candidates (budget {budget:,.0f}) ===" if budget != float("inf")
+         else "=== Buy candidates (no budget limit set -- pass --budget to narrow) ===")
+    buys = rank_buy_candidates(market, budget=budget, top_n=args.top)
+    if not buys:
+        print("  none found -- either nothing fits the budget, or too few of the "
+              "market's players have enough points history yet")
+    for c in buys:
+        p = c["player"]
+        cons = f"{c['consistency']:.2f}" if c["consistency"] is not None else "?"
+        print(f"  {p.name:<24} {p.position:<4} {p.team:<20} "
+              f"avg {c['avg_points']:6.1f} pts  consistency {cons:>4}  "
+              f"value {p.market_value:>14,.0f}")
+
+    print("\n=== Sell candidates (your squad) ===")
+    sells = rank_sell_candidates(squad, top_n=args.top)
+    if not sells:
+        print("  nothing flagged")
+    for c in sells:
+        p = c["player"]
+        print(f"  {p.name:<24} {p.position:<4} -- {', '.join(c['reasons'])}")
+
+    print("\n=== Most consistent (your squad) ===")
+    consistent = most_consistent(squad, top_n=args.top)
+    if not consistent:
+        print("  not enough match history on your squad yet")
+    for c in consistent:
+        p = c["player"]
+        print(f"  {p.name:<24} {p.position:<4} consistency {c['consistency']:.2f}  "
+              f"avg {c['avg_points']:.1f} pts")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bet", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -838,6 +911,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_check = sub.add_parser("check", help="point-in-time integrity check only")
     p_check.set_defaults(func=cmd_check)
+
+    p_kb = sub.add_parser("kickbase-advice",
+                          help="who to buy, sell and trust in your Kickbase squad")
+    p_kb.add_argument("--league-id", dest="league_id", default=None,
+                      help="required only if your account has more than one league")
+    p_kb.add_argument("--budget", type=float, default=None,
+                      help="max market value to consider for buys (default: unlimited)")
+    p_kb.add_argument("--top", type=int, default=10)
+    p_kb.set_defaults(func=cmd_kickbase)
 
     return parser
 

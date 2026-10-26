@@ -85,6 +85,7 @@ sequence from clone to dashboard, with what to expect at each step.
 | `bet fetch-news` | pull news from several feeds and extract |
 | `bet watch` | T-60 line-up check and repricing |
 | `bet dashboard --out board.html` | static HTML overview |
+| `bet kickbase-advice` | who to buy/sell/trust in your Kickbase squad |
 
 Ingest `football_data` first — it carries results *and* historical closing odds
 from several books including Pinnacle, which is what makes closing-line-value
@@ -434,6 +435,50 @@ are suppressed, and a model probability more than 10 points above the market is
 flagged as *probable model error, not value*. And `--narrate` is cosmetic only —
 the local model is handed finished numbers and asked to read them out. It never
 computes anything or decides what is recommended.
+
+## Kickbase squad advisor
+
+`bet kickbase-advice` is a separate, smaller feature: who to buy, sell, and
+trust week-to-week in your own Kickbase fantasy squad. It lives in
+`src/bet/kickbase/`, outside everything above — there is no point-in-time
+angle for a live fantasy squad, only "what does it look like right now", so
+nothing it reads goes into the DuckDB store or the backtest.
+
+**Setup.** Set `KICKBASE_EMAIL` and `KICKBASE_PASSWORD` as environment
+variables on your own machine — never as a command-line flag (shell
+history) and never in a file that could be committed. Then run:
+
+```bash
+bet kickbase-advice                       # auto-picks your league if you're only in one
+bet kickbase-advice --league-id 123456    # pick one if you're in several
+bet kickbase-advice --budget 5000000      # only consider buys you can afford
+```
+
+It prints three lists: buy candidates from the market ranked by points per
+unit of cost, sell candidates from your own squad (injured, falling value,
+or an inconsistent return for the price), and your squad's most consistent
+performers regardless of price — "consistent" meaning *steady*, not just
+*good*: a player who nets 6 every week is a safer squad member than one who
+averages the same 6 by alternating 15 and -3, which a raw average can't
+tell apart but the coefficient of variation can.
+
+**It never trades.** The client only reads your squad, the market, and your
+league table — every buy or sell stays a recommendation you act on yourself
+in the Kickbase app, the same boundary `bet`'s own forecast keeps between a
+prediction and a bet actually placed.
+
+**The honest caveat.** Kickbase publishes no API documentation. The
+endpoints and field names in `src/bet/kickbase/client.py` are built from
+what community projects have reverse-engineered over the years, not from
+anything verified against a live response — Kickbase is unreachable from
+the sandbox this was written in, same as FBref and Sofascore. Unlike those
+free, anonymous scrapers, a login is a higher-stakes guess to get wrong, so
+the client tries exactly one endpoint shape per call and raises with the
+full response body on failure rather than silently trying another guess. If
+it breaks against your real account, paste the error back — the fix is
+almost always a one-line field-name correction in `client.py`, and the
+recommendation logic in `advisor.py` (fully unit-tested on synthetic data)
+doesn't need to change at all.
 
 ## Data quality
 
