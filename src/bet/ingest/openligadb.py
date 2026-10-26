@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -20,6 +21,11 @@ from bet.teams import UnknownTeamError, resolve
 
 BASE_URL = "https://api.openligadb.de"
 LEAGUE_SHORTCUTS = {"bundesliga": "bl1", "bundesliga2": "bl2"}
+
+# `matchDateTime` (no `UTC` suffix) is German local time (CET/CEST), only
+# served by older payloads that omit `matchDateTimeUTC`. Germany's DST
+# calendar is the EU's, so this stays correct year-round rather than drifting.
+_DE_TZ = ZoneInfo("Europe/Berlin")
 
 
 def field(entry, name: str):
@@ -64,7 +70,8 @@ def parse_kickoff(entry) -> datetime:
     raw = opt(entry, "MatchDateTimeUTC")
     if not raw:
         raw = field(entry, "MatchDateTime")     # older payloads; local time
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).replace(tzinfo=None)
+        local = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).replace(tzinfo=None)
+        return local.replace(tzinfo=_DE_TZ).astimezone(timezone.utc).replace(tzinfo=None)
     parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)

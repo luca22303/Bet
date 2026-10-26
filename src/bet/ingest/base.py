@@ -62,6 +62,22 @@ class Source(ABC):
         self.store = store
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", SETTINGS.user_agent)
+        # A bare User-Agent swap was enough against FBref in testing, but not
+        # against a live run from a real residential IP -- a request with only
+        # one browser-looking header and none of the ones a real browser
+        # always sends alongside it is itself a bot signal. These are
+        # harmless, not just cosmetic, for the other sources.
+        self.session.headers.setdefault(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8")
+        self.session.headers.setdefault("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
+        # No "br": requests can only decode what the installed codecs support,
+        # and brotli is not a guaranteed dependency here -- advertising it
+        # risks a server replying with content this install cannot decompress.
+        self.session.headers.setdefault("Accept-Encoding", "gzip, deflate")
+        self.session.headers.setdefault("Connection", "keep-alive")
+        self.session.headers.setdefault("Upgrade-Insecure-Requests", "1")
         self.raw_dir = Path(raw_dir or SETTINGS.raw_dir) / self.name
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.delay = SETTINGS.request_delay_seconds if delay is None else delay

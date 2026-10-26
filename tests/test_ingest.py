@@ -221,11 +221,23 @@ def test_openligadb_reads_kickoff_as_utc_not_german_local_time(store, spelling):
 
 
 def test_openligadb_falls_back_to_local_time_when_utc_is_absent(store):
+    """`matchDateTime` ("2024-08-24T15:30:00") is German local time -- CEST,
+    UTC+2 in August -- so it still converts to 13:30 UTC, the same instant
+    `matchDateTimeUTC` gives directly. Treating the fallback field as naive
+    UTC would shift it by two hours."""
     entry = dict(OLDB_CAMEL[0])
     entry.pop("matchDateTimeUTC")
     matches, _, result = _parse_oldb(store, [entry])
-    assert matches[0]["kickoff_utc"] == datetime(2024, 8, 24, 15, 30)
+    assert matches[0]["kickoff_utc"] == datetime(2024, 8, 24, 13, 30)
     assert result.errors == []
+
+
+def test_openligadb_fallback_handles_winter_time_with_no_dst_offset(store):
+    entry = dict(OLDB_CAMEL[0])
+    entry.pop("matchDateTimeUTC")
+    entry["matchDateTime"] = "2024-11-30T15:30:00"
+    matches, _, _ = _parse_oldb(store, [entry])
+    assert matches[0]["kickoff_utc"] == datetime(2024, 11, 30, 14, 30)
 
 
 def test_openligadb_collapses_repeated_failures_and_names_the_fields(store):
