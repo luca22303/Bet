@@ -113,7 +113,7 @@ class RefreshReport:
 
 
 def refresh(store, *, seasons: list[int] | None = None, league: str = "bundesliga",
-            sources: tuple[str, ...] = ("football_data", "openligadb", "clubelo"),
+            sources: tuple[str, ...] = ("football_data", "openligadb"),
             with_shots: bool = False, max_matches: int | None = None,
             cache: bool = False, on_progress=None) -> RefreshReport:
     """Pull the latest data from the live sources.
@@ -292,7 +292,7 @@ def _run(report: RefreshReport, source, **kwargs) -> None:
 
 def refresh_and_render(store, output: Path, *, days: int = 8,
                        league: str = "bundesliga", seasons: list[int] | None = None,
-                       sources: tuple[str, ...] = ("football_data", "openligadb", "clubelo"),
+                       sources: tuple[str, ...] = ("football_data", "openligadb"),
                        with_shots: bool = False, max_matches: int | None = None,
                        backtest_from: str | None = None) -> RefreshReport:
     """Fetch, then rebuild the dashboard from what was fetched."""

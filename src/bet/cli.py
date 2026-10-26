@@ -870,8 +870,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--out", default="dashboard.html")
     p_live.add_argument("--seasons", default=None,
                         help="default: the current season, worked out from today")
-    p_live.add_argument("--sources", default="football_data,openligadb,clubelo",
-                        help="comma-separated; add understat,fbref for xG and players")
+    p_live.add_argument("--sources", default="football_data,openligadb",
+                        help="comma-separated; add clubelo for power ratings if it's "
+                             "working for you, understat,fbref for xG and players")
     p_live.add_argument("--days", type=int, default=8)
     p_live.add_argument("--league", default="bundesliga")
     p_live.add_argument("--shots", action="store_true", help="Understat shot data (slow)")
@@ -899,7 +900,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "unauthenticated, so only change this behind a proxy")
     p_serve.add_argument("--days", type=int, default=8)
     p_serve.add_argument("--league", default="bundesliga")
-    p_serve.add_argument("--sources", default="football_data,openligadb,clubelo")
+    p_serve.add_argument("--sources", default="football_data,openligadb")
     p_serve.add_argument("--refresh", action="store_true",
                          help="fetch fresh data as the server starts")
     p_serve.add_argument("--no-open", action="store_true",

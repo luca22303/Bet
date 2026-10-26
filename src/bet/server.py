@@ -39,7 +39,7 @@ class ServerState:
     db_path: Path | None
     days: int = 8
     league: str = "bundesliga"
-    sources: tuple[str, ...] = ("football_data", "openligadb", "clubelo")
+    sources: tuple[str, ...] = ("football_data", "openligadb")
     refreshing: bool = False
     last_refresh: datetime | None = None
     last_report: str = ""
@@ -336,7 +336,7 @@ def make_server(state: ServerState, port: int = 8765,
 
 def serve(db_path: Path | None, *, port: int = 8765, host: str = "127.0.0.1",
           days: int = 8, league: str = "bundesliga",
-          sources: tuple[str, ...] = ("football_data", "openligadb", "clubelo"),
+          sources: tuple[str, ...] = ("football_data", "openligadb"),
           open_browser: bool = True, refresh_on_start: bool = False) -> None:
     """Run until interrupted."""
     state = ServerState(db_path=db_path, days=days, league=league, sources=sources)
